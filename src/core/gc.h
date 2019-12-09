@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,10 +23,12 @@
 #ifndef JANET_GC_H
 #define JANET_GC_H
 
-#include <janet/janet.h>
+#ifndef JANET_AMALG
+#include <janet.h>
+#endif
 
 /* The metadata header associated with an allocated block of memory */
-#define janet_gc_header(mem) ((JanetGCMemoryHeader *)(mem) - 1)
+#define janet_gc_header(mem) ((JanetGCObject *)(mem))
 
 #define JANET_MEM_TYPEBITS 0xFF
 #define JANET_MEM_REACHABLE 0x100
@@ -36,15 +38,7 @@
 #define janet_gc_type(m) (janet_gc_header(m)->flags & 0xFF)
 
 #define janet_gc_mark(m) (janet_gc_header(m)->flags |= JANET_MEM_REACHABLE)
-#define janet_gc_unmark(m) (janet_gc_header(m)->flags &= ~JANET_MEM_COLOR)
 #define janet_gc_reachable(m) (janet_gc_header(m)->flags & JANET_MEM_REACHABLE)
-
-/* Memory header struct. Node of a linked list of memory blocks. */
-typedef struct JanetGCMemoryHeader JanetGCMemoryHeader;
-struct JanetGCMemoryHeader {
-    JanetGCMemoryHeader *next;
-    uint32_t flags;
-};
 
 /* Memory types for the GC. Different from JanetType to include funcenv and funcdef. */
 enum JanetMemoryType {

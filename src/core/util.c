@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,10 +20,14 @@
 * IN THE SOFTWARE.
 */
 
-#include <janet/janet.h>
+#include <inttypes.h>
+
+#ifndef JANET_AMALG
+#include <janet.h>
 #include "util.h"
 #include "state.h"
 #include "gc.h"
+#endif
 
 /* Base 64 lookup table for digits */
 const char janet_base64[65] =
@@ -34,58 +38,59 @@ const char janet_base64[65] =
 
 /* The JANET value types in order. These types can be used as
  * mnemonics instead of a bit pattern for type checking */
-const char *const janet_type_names[15] = {
-    ":nil",
-    ":boolean",
-    ":boolean",
-    ":fiber",
-    ":number",
-    ":string",
-    ":symbol",
-    ":array",
-    ":tuple",
-    ":table",
-    ":struct",
-    ":buffer",
-    ":function",
-    ":cfunction",
-    ":abstract"
+const char *const janet_type_names[16] = {
+    "number",
+    "nil",
+    "boolean",
+    "fiber",
+    "string",
+    "symbol",
+    "keyword",
+    "array",
+    "tuple",
+    "table",
+    "struct",
+    "buffer",
+    "function",
+    "cfunction",
+    "abstract",
+    "pointer"
 };
 
 const char *const janet_signal_names[14] = {
-    ":ok",
-    ":error",
-    ":debug",
-    ":yield",
-    ":user0",
-    ":user1",
-    ":user2",
-    ":user3",
-    ":user4",
-    ":user5",
-    ":user6",
-    ":user7",
-    ":user8",
-    ":user9"
+    "ok",
+    "error",
+    "debug",
+    "yield",
+    "user0",
+    "user1",
+    "user2",
+    "user3",
+    "user4",
+    "user5",
+    "user6",
+    "user7",
+    "user8",
+    "user9"
 };
 
 const char *const janet_status_names[16] = {
-    ":dead",
-    ":error",
-    ":debug",
-    ":pending",
-    ":user0",
-    ":user1",
-    ":user2",
-    ":user3",
-    ":user4",
-    ":user5",
-    ":user6",
-    ":user7",
-    ":user8",
-    ":user9",
-    ":new",
-    ":alive"
+    "dead",
+    "error",
+    "debug",
+    "pending",
+    "user0",
+    "user1",
+    "user2",
+    "user3",
+    "user4",
+    "user5",
+    "user6",
+    "user7",
+    "user8",
+    "user9",
+    "new",
+    "alive"
 };
 
 /* Calculate hash for string */
@@ -131,7 +136,7 @@ int32_t janet_tablen(int32_t n) {
 }
 
 /* Helper to find a value in a Janet struct or table. Returns the bucket
- * containg the key, or the first empty bucket if there is no such key. */
+ * containing the key, or the first empty bucket if there is no such key. */
 const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key) {
     int32_t index = janet_maphash(cap, janet_hash(key));
     int32_t i;
@@ -186,7 +191,7 @@ const JanetKV *janet_dictionary_next(const JanetKV *kvs, int32_t cap, const Jane
     return NULL;
 }
 
-/* Compare a janet string with a cstring. more efficient than loading
+/* Compare a janet string with a cstring. More efficient than loading
  * c string as a janet string. */
 int janet_cstrcmp(const uint8_t *str, const char *other) {
     int32_t len = janet_string_length(str);
@@ -203,12 +208,12 @@ int janet_cstrcmp(const uint8_t *str, const char *other) {
 
 /* Do a binary search on a static array of structs. Each struct must
  * have a string as its first element, and the struct must be sorted
- * lexogrpahically by that element. */
+ * lexicographically by that element. */
 const void *janet_strbinsearch(
-        const void *tab,
-        size_t tabcount,
-        size_t itemsize,
-        const uint8_t *key) {
+    const void *tab,
+    size_t tabcount,
+    size_t itemsize,
+    const uint8_t *key) {
     size_t low = 0;
     size_t hi = tabcount;
     const char *t = (const char *)tab;
@@ -238,9 +243,9 @@ void janet_register(const char *name, JanetCFunction cfun) {
 /* Add a def to an environment */
 void janet_def(JanetTable *env, const char *name, Janet val, const char *doc) {
     JanetTable *subt = janet_table(2);
-    janet_table_put(subt, janet_csymbolv(":value"), val);
+    janet_table_put(subt, janet_ckeywordv("value"), val);
     if (doc)
-        janet_table_put(subt, janet_csymbolv(":doc"), janet_cstringv(doc));
+        janet_table_put(subt, janet_ckeywordv("doc"), janet_cstringv(doc));
     janet_table_put(env, janet_csymbolv(name), janet_wrap_table(subt));
 }
 
@@ -249,9 +254,9 @@ void janet_var(JanetTable *env, const char *name, Janet val, const char *doc) {
     JanetArray *array = janet_array(1);
     JanetTable *subt = janet_table(2);
     janet_array_push(array, val);
-    janet_table_put(subt, janet_csymbolv(":ref"), janet_wrap_array(array));
+    janet_table_put(subt, janet_ckeywordv("ref"), janet_wrap_array(array));
     if (doc)
-        janet_table_put(subt, janet_csymbolv(":doc"), janet_cstringv(doc));
+        janet_table_put(subt, janet_ckeywordv("doc"), janet_cstringv(doc));
     janet_table_put(env, janet_csymbolv(name), janet_wrap_table(subt));
 }
 
@@ -265,12 +270,13 @@ void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) 
             int32_t nmlen = 0;
             while (regprefix[reglen]) reglen++;
             while (cfuns->name[nmlen]) nmlen++;
-            uint8_t *longname_buffer =
-                janet_string_begin(reglen + 1 + nmlen);
+            int32_t symlen = reglen + 1 + nmlen;
+            uint8_t *longname_buffer = malloc(symlen);
             memcpy(longname_buffer, regprefix, reglen);
-            longname_buffer[reglen] = '.';
+            longname_buffer[reglen] = '/';
             memcpy(longname_buffer + reglen + 1, cfuns->name, nmlen);
-            longname = janet_wrap_symbol(janet_string_end(longname_buffer));
+            longname = janet_wrap_symbol(janet_symbol(longname_buffer, symlen));
+            free(longname_buffer);
         }
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         janet_def(env, cfuns->name, fun, cfuns->documentation);
@@ -278,6 +284,77 @@ void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) 
         cfuns++;
     }
 }
+
+/* Abstract type introspection */
+
+static const JanetAbstractType type_wrap = {
+    "core/type-info",
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+};
+
+typedef struct {
+    const JanetAbstractType *at;
+} JanetAbstractTypeWrap;
+
+void janet_register_abstract_type(const JanetAbstractType *at) {
+    JanetAbstractTypeWrap *abstract = (JanetAbstractTypeWrap *)
+                                      janet_abstract(&type_wrap, sizeof(JanetAbstractTypeWrap));
+    abstract->at = at;
+    Janet sym = janet_csymbolv(at->name);
+    if (!(janet_checktype(janet_table_get(janet_vm_registry, sym), JANET_NIL))) {
+        janet_panicf("cannot register abstract type %s, "
+                     "a type with the same name exists", at->name);
+    }
+    janet_table_put(janet_vm_registry, sym, janet_wrap_abstract(abstract));
+}
+
+const JanetAbstractType *janet_get_abstract_type(Janet key) {
+    Janet twrap = janet_table_get(janet_vm_registry, key);
+    if (janet_checktype(twrap, JANET_NIL)) {
+        return NULL;
+    }
+    if (!janet_checktype(twrap, JANET_ABSTRACT) ||
+            (janet_abstract_type(janet_unwrap_abstract(twrap)) != &type_wrap)) {
+        janet_panic("expected abstract type");
+    }
+    JanetAbstractTypeWrap *w = (JanetAbstractTypeWrap *)janet_unwrap_abstract(twrap);
+    return w->at;
+}
+
+#ifndef JANET_BOOTSTRAP
+void janet_core_def(JanetTable *env, const char *name, Janet x, const void *p) {
+    (void) p;
+    Janet key = janet_csymbolv(name);
+    Janet value;
+    /* During init, allow replacing core library cfunctions with values from
+     * the env. */
+    Janet check = janet_table_get(env, key);
+    if (janet_checktype(check, JANET_NIL)) {
+        value = x;
+    } else {
+        value = check;
+    }
+    janet_table_put(env, key, value);
+    if (janet_checktype(value, JANET_CFUNCTION)) {
+        janet_table_put(janet_vm_registry, value, key);
+    }
+}
+
+void janet_core_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) {
+    (void) regprefix;
+    while (cfuns->name) {
+        Janet fun = janet_wrap_cfunction(cfuns->cfun);
+        janet_core_def(env, cfuns->name, fun, cfuns->documentation);
+        cfuns++;
+    }
+}
+#endif
 
 /* Resolve a symbol in the environment */
 JanetBindingType janet_resolve(JanetTable *env, const uint8_t *sym, Janet *out) {
@@ -288,30 +365,18 @@ JanetBindingType janet_resolve(JanetTable *env, const uint8_t *sym, Janet *out) 
         return JANET_BINDING_NONE;
     entry_table = janet_unwrap_table(entry);
     if (!janet_checktype(
-        janet_table_get(entry_table, janet_csymbolv(":macro")),
-        JANET_NIL)) {
-        *out = janet_table_get(entry_table, janet_csymbolv(":value"));
+                janet_table_get(entry_table, janet_ckeywordv("macro")),
+                JANET_NIL)) {
+        *out = janet_table_get(entry_table, janet_ckeywordv("value"));
         return JANET_BINDING_MACRO;
     }
-    ref = janet_table_get(entry_table, janet_csymbolv(":ref"));
+    ref = janet_table_get(entry_table, janet_ckeywordv("ref"));
     if (janet_checktype(ref, JANET_ARRAY)) {
         *out = ref;
         return JANET_BINDING_VAR;
     }
-    *out = janet_table_get(entry_table, janet_csymbolv(":value"));
+    *out = janet_table_get(entry_table, janet_ckeywordv("value"));
     return JANET_BINDING_DEF;
-}
-
-/* Get module from the arguments passed to library */
-JanetTable *janet_env(JanetArgs args) {
-    JanetTable *module;
-    if (args.n >= 1 && janet_checktype(args.v[0], JANET_TABLE)) {
-        module = janet_unwrap_table(args.v[0]);
-    } else {
-        module = janet_table(0);
-    }
-    *args.ret = janet_wrap_table(module);
-    return module;
 }
 
 /* Read both tuples and arrays as c pointers + int32_t length. Return 1 if the
@@ -323,7 +388,7 @@ int janet_indexed_view(Janet seq, const Janet **data, int32_t *len) {
         return 1;
     } else if (janet_checktype(seq, JANET_TUPLE)) {
         *data = janet_unwrap_tuple(seq);
-        *len = janet_tuple_length(janet_unwrap_struct(seq));
+        *len = janet_tuple_length(janet_unwrap_tuple(seq));
         return 1;
     }
     return 0;
@@ -332,7 +397,8 @@ int janet_indexed_view(Janet seq, const Janet **data, int32_t *len) {
 /* Read both strings and buffer as unsigned character array + int32_t len.
  * Returns 1 if the view can be constructed and 0 if the type is invalid. */
 int janet_bytes_view(Janet str, const uint8_t **data, int32_t *len) {
-    if (janet_checktype(str, JANET_STRING) || janet_checktype(str, JANET_SYMBOL)) {
+    if (janet_checktype(str, JANET_STRING) || janet_checktype(str, JANET_SYMBOL) ||
+            janet_checktype(str, JANET_KEYWORD)) {
         *data = janet_unwrap_string(str);
         *len = janet_string_length(janet_unwrap_string(str));
         return 1;
@@ -362,67 +428,6 @@ int janet_dictionary_view(Janet tab, const JanetKV **data, int32_t *len, int32_t
     return 0;
 }
 
-/* Get actual type name of a value for debugging purposes */
-static const char *typestr(JanetArgs args, int32_t n) {
-    JanetType actual = n < args.n ? janet_type(args.v[n]) : JANET_NIL;
-    return ((actual == JANET_ABSTRACT)
-        ? janet_abstract_type(janet_unwrap_abstract(args.v[n]))->name
-        : janet_type_names[actual]) + 1;
-}
-
-int janet_type_err(JanetArgs args, int32_t n, JanetType expected) {
-    const uint8_t *message = janet_formatc(
-            "bad slot #%d, expected %t, got %s",
-            n,
-            expected,
-            typestr(args, n));
-    JANET_THROWV(args, janet_wrap_string(message));
-}
-
-void janet_buffer_push_types(JanetBuffer *buffer, int types) {
-    int first = 1;
-    int i = 0;
-    while (types) {
-        if (1 & types) {
-            if (first) {
-                first = 0;
-            } else {
-                janet_buffer_push_u8(buffer, '|');
-            }
-            janet_buffer_push_cstring(buffer, janet_type_names[i] + 1);
-        }
-        i++;
-        types >>= 1;
-    }
-}
-
-int janet_typemany_err(JanetArgs args, int32_t n, int expected) {
-    const uint8_t *message;
-    JanetBuffer buf;
-    janet_buffer_init(&buf, 20);
-    janet_buffer_push_string(&buf, janet_formatc("bad slot #%d, expected ", n));
-    janet_buffer_push_types(&buf, expected);
-    janet_buffer_push_cstring(&buf, ", got ");
-    janet_buffer_push_cstring(&buf, typestr(args, n));
-    message = janet_string(buf.data, buf.count);
-    janet_buffer_deinit(&buf);
-    JANET_THROWV(args, janet_wrap_string(message));
-}
-
-int janet_arity_err(JanetArgs args, int32_t n, const char *prefix) {
-    JANET_THROWV(args,
-            janet_wrap_string(janet_formatc(
-                    "expected %s%d argument%s, got %d",
-                    prefix, n, n == 1 ? "" : "s", args.n)));
-}
-
-int janet_typeabstract_err(JanetArgs args, int32_t n, const JanetAbstractType *at) {
-    JANET_THROWV(args,
-            janet_wrap_string(janet_formatc(
-                    "bad slot #%d, expected %s, got %s",
-                    n, at->name, typestr(args, n))));
-}
-
 int janet_checkint(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
@@ -435,4 +440,12 @@ int janet_checkint64(Janet x) {
         return 0;
     double dval = janet_unwrap_number(x);
     return janet_checkint64range(dval);
+}
+
+int janet_checksize(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return dval == (double)((size_t) dval) &&
+           dval <= SIZE_MAX;
 }

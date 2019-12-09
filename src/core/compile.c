@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,10 +20,14 @@
 * IN THE SOFTWARE.
 */
 
-#include <janet/janet.h>
+#ifndef JANET_AMALG
+#include <janet.h>
 #include "compile.h"
 #include "emit.h"
 #include "vector.h"
+#include "util.h"
+#include "state.h"
+#endif
 
 JanetFopts janetc_fopts_default(JanetCompiler *c) {
     JanetFopts ret;
@@ -94,7 +98,6 @@ void janetc_scope(JanetScope *s, JanetCompiler *c, int flags, const char *name) 
     scope.syms = NULL;
     scope.envs = NULL;
     scope.defs = NULL;
-    scope.selfconst = -1;
     scope.bytecode_start = janet_v_count(c->buffer);
     scope.flags = flags;
     scope.parent = c->scope;
@@ -163,8 +166,8 @@ void janetc_popscope_keepslot(JanetCompiler *c, JanetSlot retslot) {
 
 /* Allow searching for symbols. Return information about the symbol */
 JanetSlot janetc_resolve(
-        JanetCompiler *c,
-        const uint8_t *sym) {
+    JanetCompiler *c,
+    const uint8_t *sym) {
 
     JanetSlot ret = janetc_cslot(janet_wrap_nil());
     JanetScope *scope = c->scope;
@@ -203,8 +206,7 @@ JanetSlot janetc_resolve(
             case JANET_BINDING_DEF:
             case JANET_BINDING_MACRO: /* Macro should function like defs when not in calling pos */
                 return janetc_cslot(check);
-            case JANET_BINDING_VAR:
-            {
+            case JANET_BINDING_VAR: {
                 JanetSlot ret = janetc_cslot(check);
                 /* TODO save type info */
                 ret.flags |= JANET_SLOT_REF | JANET_SLOT_NAMED | JANET_SLOT_MUTABLE | JANET_SLOTTYPE_ANY;
@@ -215,7 +217,7 @@ JanetSlot janetc_resolve(
     }
 
     /* Symbol was found */
-    found:
+found:
 
     /* Constants can be returned immediately (they are stateless) */
     if (ret.flags & (JANET_SLOT_CONSTANT | JANET_SLOT_REF))
@@ -235,7 +237,7 @@ JanetSlot janetc_resolve(
     scope->flags |= JANET_SCOPE_ENV;
     scope = scope->child;
 
-    /* Propogate env up to current scope */
+    /* Propagate env up to current scope */
     int32_t envindex = -1;
     while (scope) {
         if (scope->flags & JANET_SCOPE_FUNCTION) {
@@ -280,8 +282,8 @@ JanetSlot janetc_return(JanetCompiler *c, JanetSlot s) {
 JanetSlot janetc_gettarget(JanetFopts opts) {
     JanetSlot slot;
     if ((opts.flags & JANET_FOPTS_HINT) &&
-        (opts.hint.envindex < 0) &&
-        (opts.hint.index >= 0 && opts.hint.index <= 0xFF)) {
+            (opts.hint.envindex < 0) &&
+            (opts.hint.index >= 0 && opts.hint.index <= 0xFF)) {
         slot = opts.hint;
     } else {
         slot.envindex = -1;
@@ -308,9 +310,9 @@ JanetSlot *janetc_toslotskv(JanetCompiler *c, Janet ds) {
     JanetSlot *ret = NULL;
     JanetFopts subopts = janetc_fopts_default(c);
     const JanetKV *kvs = NULL;
-    int32_t cap, i, len;
+    int32_t cap = 0, len = 0;
     janet_dictionary_view(ds, &kvs, &len, &cap);
-    for (i = 0; i < cap; i++) {
+    for (int32_t i = 0; i < cap; i++) {
         if (janet_checktype(kvs[i].key, JANET_NIL)) continue;
         janet_v_push(ret, janetc_value(subopts, kvs[i].key));
         janet_v_push(ret, janetc_value(subopts, kvs[i].value));
@@ -318,33 +320,46 @@ JanetSlot *janetc_toslotskv(JanetCompiler *c, Janet ds) {
     return ret;
 }
 
-/* Push slots load via janetc_toslots. */
-void janetc_pushslots(JanetCompiler *c, JanetSlot *slots) {
+/* Push slots loaded via janetc_toslots. Return the minimum number of slots pushed,
+ * or -1 - min_arity if there is a splice. (if there is no splice, min_arity is also
+ * the maximum possible arity). */
+int32_t janetc_pushslots(JanetCompiler *c, JanetSlot *slots) {
     int32_t i;
     int32_t count = janet_v_count(slots);
+    int32_t min_arity = 0;
+    int has_splice = 0;
     for (i = 0; i < count;) {
         if (slots[i].flags & JANET_SLOT_SPLICED) {
             janetc_emit_s(c, JOP_PUSH_ARRAY, slots[i], 0);
             i++;
+            has_splice = 1;
         } else if (i + 1 == count) {
             janetc_emit_s(c, JOP_PUSH, slots[i], 0);
             i++;
+            min_arity++;
         } else if (slots[i + 1].flags & JANET_SLOT_SPLICED) {
             janetc_emit_s(c, JOP_PUSH, slots[i], 0);
-            janetc_emit_s(c, JOP_PUSH_ARRAY, slots[i+1], 0);
+            janetc_emit_s(c, JOP_PUSH_ARRAY, slots[i + 1], 0);
             i += 2;
+            min_arity++;
+            has_splice = 1;
         } else if (i + 2 == count) {
-            janetc_emit_ss(c, JOP_PUSH_2, slots[i], slots[i+1], 0);
+            janetc_emit_ss(c, JOP_PUSH_2, slots[i], slots[i + 1], 0);
             i += 2;
+            min_arity += 2;
         } else if (slots[i + 2].flags & JANET_SLOT_SPLICED) {
-            janetc_emit_ss(c, JOP_PUSH_2, slots[i], slots[i+1], 0);
-            janetc_emit_s(c, JOP_PUSH_ARRAY, slots[i+2], 0);
+            janetc_emit_ss(c, JOP_PUSH_2, slots[i], slots[i + 1], 0);
+            janetc_emit_s(c, JOP_PUSH_ARRAY, slots[i + 2], 0);
             i += 3;
+            min_arity += 2;
+            has_splice = 1;
         } else {
-            janetc_emit_sss(c, JOP_PUSH_3, slots[i], slots[i+1], slots[i+2], 0);
+            janetc_emit_sss(c, JOP_PUSH_3, slots[i], slots[i + 1], slots[i + 2], 0);
             i += 3;
+            min_arity += 3;
         }
     }
+    return has_splice ? (-1 - min_arity) : min_arity;
 }
 
 /* Check if a list of slots has any spliced slots */
@@ -401,8 +416,70 @@ static JanetSlot janetc_call(JanetFopts opts, JanetSlot *slots, JanetSlot fun) {
         /* TODO janet function inlining (no c functions)*/
     }
     if (!specialized) {
-        janetc_pushslots(c, slots);
-        if (opts.flags & JANET_FOPTS_TAIL) {
+        int32_t min_arity = janetc_pushslots(c, slots);
+        /* Check for provably incorrect function calls */
+        if (fun.flags & JANET_SLOT_CONSTANT) {
+
+            /* Check for bad arity type if fun is a constant */
+            switch (janet_type(fun.constant)) {
+                case JANET_FUNCTION: {
+                    JanetFunction *f = janet_unwrap_function(fun.constant);
+                    int32_t min = f->def->min_arity;
+                    int32_t max = f->def->max_arity;
+                    if (min_arity < 0) {
+                        /* Call has splices */
+                        min_arity = -1 - min_arity;
+                        if (min_arity > max && max >= 0) {
+                            const uint8_t *es = janet_formatc(
+                                                    "%v expects at most %d argument, got at least %d",
+                                                    fun.constant, max, min_arity);
+                            janetc_error(c, es);
+                        }
+                    } else {
+                        /* Call has no splices */
+                        if (min_arity > max && max >= 0) {
+                            const uint8_t *es = janet_formatc(
+                                                    "%v expects at most %d argument, got %d",
+                                                    fun.constant, max, min_arity);
+                            janetc_error(c, es);
+                        }
+                        if (min_arity < min) {
+                            const uint8_t *es = janet_formatc(
+                                                    "%v expects at least %d argument, got %d",
+                                                    fun.constant, min, min_arity);
+                            janetc_error(c, es);
+                        }
+                    }
+                }
+                break;
+                case JANET_CFUNCTION:
+                case JANET_ABSTRACT:
+                    break;
+                case JANET_KEYWORD:
+                    if (min_arity == 0) {
+                        const uint8_t *es = janet_formatc("%v expects at least 1 argument, got 0",
+                                                          fun.constant);
+                        janetc_error(c, es);
+                    }
+                    break;
+                default:
+                    if (min_arity > 1 || min_arity == 0) {
+                        const uint8_t *es = janet_formatc("%v expects 1 argument, got %d",
+                                                          fun.constant, min_arity);
+                        janetc_error(c, es);
+                    }
+                    if (min_arity < -2) {
+                        const uint8_t *es = janet_formatc("%v expects 1 argument, got at least %d",
+                                                          fun.constant, -1 - min_arity);
+                        janetc_error(c, es);
+                    }
+                    break;
+            }
+        }
+
+        if ((opts.flags & JANET_FOPTS_TAIL) &&
+                /* Prevent top level tail calls for better errors */
+                !(c->scope->flags & JANET_SCOPE_TOP)) {
             janetc_emit_s(c, JOP_TAILCALL, fun, 0);
             retslot = janetc_cslot(janet_wrap_nil());
             retslot.flags = JANET_SLOT_RETURNED;
@@ -429,15 +506,23 @@ static JanetSlot janetc_array(JanetFopts opts, Janet x) {
     JanetCompiler *c = opts.compiler;
     JanetArray *a = janet_unwrap_array(x);
     return janetc_maker(opts,
-            janetc_toslots(c, a->data, a->count),
-            JOP_MAKE_ARRAY);
+                        janetc_toslots(c, a->data, a->count),
+                        JOP_MAKE_ARRAY);
+}
+
+static JanetSlot janetc_tuple(JanetFopts opts, Janet x) {
+    JanetCompiler *c = opts.compiler;
+    const Janet *t = janet_unwrap_tuple(x);
+    return janetc_maker(opts,
+                        janetc_toslots(c, t, janet_tuple_length(t)),
+                        JOP_MAKE_TUPLE);
 }
 
 static JanetSlot janetc_tablector(JanetFopts opts, Janet x, int op) {
     JanetCompiler *c = opts.compiler;
     return janetc_maker(opts,
-            janetc_toslotskv(c, x),
-            op);
+                        janetc_toslotskv(c, x),
+                        op);
 }
 
 static JanetSlot janetc_bufferctor(JanetFopts opts, Janet x) {
@@ -445,27 +530,30 @@ static JanetSlot janetc_bufferctor(JanetFopts opts, Janet x) {
     JanetBuffer *b = janet_unwrap_buffer(x);
     Janet onearg = janet_stringv(b->data, b->count);
     return janetc_maker(opts,
-            janetc_toslots(c, &onearg, 1),
-            JOP_MAKE_BUFFER);
+                        janetc_toslots(c, &onearg, 1),
+                        JOP_MAKE_BUFFER);
 }
 
 /* Expand a macro one time. Also get the special form compiler if we
  * find that instead. */
 static int macroexpand1(
-        JanetCompiler *c,
-        Janet x,
-        Janet *out,
-        const JanetSpecial **spec) {
+    JanetCompiler *c,
+    Janet x,
+    Janet *out,
+    const JanetSpecial **spec) {
     if (!janet_checktype(x, JANET_TUPLE))
         return 0;
     const Janet *form = janet_unwrap_tuple(x);
     if (janet_tuple_length(form) == 0)
         return 0;
     /* Source map - only set when we get a tuple */
-    if (janet_tuple_sm_start(form) >= 0) {
-        c->current_mapping.start = janet_tuple_sm_start(form);
-        c->current_mapping.end = janet_tuple_sm_end(form);
+    if (janet_tuple_sm_line(form) >= 0) {
+        c->current_mapping.line = janet_tuple_sm_line(form);
+        c->current_mapping.column = janet_tuple_sm_column(form);
     }
+    /* Bracketed tuples are not specials or macros! */
+    if (janet_tuple_flag(form) & JANET_TUPLE_FLAG_BRACKETCTOR)
+        return 0;
     if (!janet_checktype(form[0], JANET_SYMBOL))
         return 0;
     const uint8_t *name = janet_unwrap_symbol(form[0]);
@@ -480,17 +568,25 @@ static int macroexpand1(
             !janet_checktype(macroval, JANET_FUNCTION))
         return 0;
 
-
     /* Evaluate macro */
-    JanetFiber *fiberp;
     JanetFunction *macro = janet_unwrap_function(macroval);
+    int32_t arity = janet_tuple_length(form) - 1;
+    JanetFiber *fiberp = janet_fiber(macro, 64, arity, form + 1);
+    if (NULL == fiberp) {
+        int32_t minar = macro->def->min_arity;
+        int32_t maxar = macro->def->max_arity;
+        const uint8_t *es = NULL;
+        if (minar >= 0 && arity < minar)
+            es = janet_formatc("macro arity mismatch, expected at least %d, got %d", minar, arity);
+        if (maxar >= 0 && arity > maxar)
+            es = janet_formatc("macro arity mismatch, expected at most %d, got %d", maxar, arity);
+        c->result.macrofiber = NULL;
+        janetc_error(c, es);
+    }
+    /* Set env */
+    fiberp->env = c->env;
     int lock = janet_gclock();
-    JanetSignal status = janet_call(
-            macro,
-            janet_tuple_length(form) - 1,
-            form + 1,
-            &x,
-            &fiberp);
+    JanetSignal status = janet_continue(fiberp, janet_wrap_nil(), &x);
     janet_gcunlock(lock);
     if (status != JANET_SIGNAL_OK) {
         const uint8_t *es = janet_formatc("(macro) %V", x);
@@ -536,24 +632,25 @@ JanetSlot janetc_value(JanetFopts opts, Janet x) {
         ret = spec->compile(opts, janet_tuple_length(tup) - 1, tup + 1);
     } else {
         switch (janet_type(x)) {
-            case JANET_TUPLE:
-                {
-                    JanetFopts subopts = janetc_fopts_default(c);
-                    const Janet *tup = janet_unwrap_tuple(x);
-                    /* Empty tuple is tuple literal */
-                    if (janet_tuple_length(tup) == 0) {
-                        ret = janetc_cslot(x);
-                    } else {
-                        JanetSlot head = janetc_value(subopts, tup[0]);
-                        subopts.flags = JANET_FUNCTION | JANET_CFUNCTION;
-                        ret = janetc_call(opts, janetc_toslots(c, tup + 1, janet_tuple_length(tup) - 1), head);
-                        janetc_freeslot(c, head);
-                    }
-                    ret.flags &= ~JANET_SLOT_SPLICED;
+            case JANET_TUPLE: {
+                JanetFopts subopts = janetc_fopts_default(c);
+                const Janet *tup = janet_unwrap_tuple(x);
+                /* Empty tuple is tuple literal */
+                if (janet_tuple_length(tup) == 0) {
+                    ret = janetc_cslot(janet_wrap_tuple(janet_tuple_n(NULL, 0)));
+                } else if (janet_tuple_flag(tup) & JANET_TUPLE_FLAG_BRACKETCTOR) { /* [] tuples are not function call */
+                    ret = janetc_tuple(opts, x);
+                } else {
+                    JanetSlot head = janetc_value(subopts, tup[0]);
+                    subopts.flags = JANET_FUNCTION | JANET_CFUNCTION;
+                    ret = janetc_call(opts, janetc_toslots(c, tup + 1, janet_tuple_length(tup) - 1), head);
+                    janetc_freeslot(c, head);
                 }
-                break;
+                ret.flags &= ~JANET_SLOT_SPLICED;
+            }
+            break;
             case JANET_SYMBOL:
-                ret = janetc_sym_rvalue(opts, janet_unwrap_symbol(x));
+                ret = janetc_resolve(c, janet_unwrap_symbol(x));
                 break;
             case JANET_ARRAY:
                 ret = janetc_array(opts, x);
@@ -576,13 +673,13 @@ JanetSlot janetc_value(JanetFopts opts, Janet x) {
     if (c->result.status == JANET_COMPILE_ERROR)
         return janetc_cslot(janet_wrap_nil());
     if (opts.flags & JANET_FOPTS_TAIL)
-        ret = janetc_return(opts.compiler, ret);
+        ret = janetc_return(c, ret);
     if (opts.flags & JANET_FOPTS_HINT) {
-        janetc_copy(opts.compiler, opts.hint, ret);
+        janetc_copy(c, opts.hint, ret);
         ret = opts.hint;
     }
     c->current_mapping = last_mapping;
-    opts.compiler->recursion_guard++;
+    c->recursion_guard++;
     return ret;
 }
 
@@ -614,7 +711,7 @@ JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
         }
         memcpy(def->bytecode, c->buffer + scope->bytecode_start, s);
         janet_v__cnt(c->buffer) = scope->bytecode_start;
-        if (NULL != c->mapbuffer) {
+        if (NULL != c->mapbuffer && c->source) {
             size_t s = sizeof(JanetSourceMapping) * def->bytecode_length;
             def->sourcemap = malloc(s);
             if (NULL == def->sourcemap) {
@@ -629,6 +726,7 @@ JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
     def->source = c->source;
 
     def->arity = 0;
+    def->min_arity = 0;
     def->flags = 0;
     if (scope->flags & JANET_SCOPE_ENV) {
         def->flags |= JANET_FUNCDEF_FLAG_NEEDSENV;
@@ -648,15 +746,15 @@ static void janetc_init(JanetCompiler *c, JanetTable *env, const uint8_t *where)
     c->recursion_guard = JANET_RECURSION_GUARD;
     c->env = env;
     c->source = where;
-    c->current_mapping.start = -1;
-    c->current_mapping.end = -1;
+    c->current_mapping.line = -1;
+    c->current_mapping.column = -1;
     /* Init result */
     c->result.error = NULL;
     c->result.status = JANET_COMPILE_OK;
     c->result.funcdef = NULL;
     c->result.macrofiber = NULL;
-    c->result.error_mapping.start = -1;
-    c->result.error_mapping.end = -1;
+    c->result.error_mapping.line = -1;
+    c->result.error_mapping.column = -1;
 }
 
 /* Deinitialize a compiler struct */
@@ -700,45 +798,44 @@ JanetCompileResult janet_compile(Janet source, JanetTable *env, const uint8_t *w
 }
 
 /* C Function for compiling */
-static int cfun(JanetArgs args) {
-    JanetCompileResult res;
-    JanetTable *t;
-    JanetTable *env;
-    JANET_MINARITY(args, 2);
-    JANET_MAXARITY(args, 3);
-    JANET_ARG_TABLE(env, args, 1);
-    const uint8_t *source = NULL;
-    if (args.n == 3) {
-        JANET_ARG_STRING(source, args, 2);
+static Janet cfun(int32_t argc, Janet *argv) {
+    janet_arity(argc, 1, 3);
+    JanetTable *env = argc > 1 ? janet_gettable(argv, 1) : janet_vm_fiber->env;
+    if (NULL == env) {
+        env = janet_table(0);
+        janet_vm_fiber->env = env;
     }
-    res = janet_compile(args.v[0], env, source);
+    const uint8_t *source = NULL;
+    if (argc == 3) {
+        source = janet_getstring(argv, 2);
+    }
+    JanetCompileResult res = janet_compile(argv[0], env, source);
     if (res.status == JANET_COMPILE_OK) {
-        JANET_RETURN_FUNCTION(args, janet_thunk(res.funcdef));
+        return janet_wrap_function(janet_thunk(res.funcdef));
     } else {
-        t = janet_table(4);
-        janet_table_put(t, janet_csymbolv(":error"), janet_wrap_string(res.error));
-        janet_table_put(t, janet_csymbolv(":start"), janet_wrap_integer(res.error_mapping.start));
-        janet_table_put(t, janet_csymbolv(":end"), janet_wrap_integer(res.error_mapping.end));
+        JanetTable *t = janet_table(4);
+        janet_table_put(t, janet_ckeywordv("error"), janet_wrap_string(res.error));
+        janet_table_put(t, janet_ckeywordv("line"), janet_wrap_integer(res.error_mapping.line));
+        janet_table_put(t, janet_ckeywordv("column"), janet_wrap_integer(res.error_mapping.column));
         if (res.macrofiber) {
-            janet_table_put(t, janet_csymbolv(":fiber"), janet_wrap_fiber(res.macrofiber));
+            janet_table_put(t, janet_ckeywordv("fiber"), janet_wrap_fiber(res.macrofiber));
         }
-        JANET_RETURN_TABLE(args, t);
+        return janet_wrap_table(t);
     }
 }
 
-static const JanetReg cfuns[] = {
-    {"compile", cfun,
-        "(compile ast env [, source])\n\n"
-        "Compiles an Abstract Sytnax Tree (ast) into a janet function. "
-        "Pair the compile function with parsing functionality to implement "
-        "eval. Returns a janet function and does not modify ast. Throws an "
-        "error if the ast cannot be compiled."
+static const JanetReg compile_cfuns[] = {
+    {
+        "compile", cfun,
+        JDOC("(compile ast &opt env source)\n\n"
+             "Compiles an Abstract Syntax Tree (ast) into a janet function. "
+             "Pair the compile function with parsing functionality to implement "
+             "eval. Returns a janet function and does not modify ast. Throws an "
+             "error if the ast cannot be compiled.")
     },
     {NULL, NULL, NULL}
 };
 
-int janet_lib_compile(JanetArgs args) {
-    JanetTable *env = janet_env(args);
-    janet_cfuns(env, NULL, cfuns);
-    return 0;
+void janet_lib_compile(JanetTable *env) {
+    janet_core_cfuns(env, NULL, compile_cfuns);
 }

@@ -1,0 +1,9 @@
+/build
+.cache
+.manifests
+json.*
+jhydro.*
+circlet.*
+argparse.*
+sqlite3.*
+path.*

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,8 +20,11 @@
 * IN THE SOFTWARE.
 */
 
-#include <janet/janet.h>
+#ifndef JANET_AMALG
+#include <janet.h>
 #include "regalloc.h"
+#include "util.h"
+#endif
 
 void janetc_regalloc_init(JanetcRegisterAllocator *ra) {
     ra->chunks = NULL;
@@ -57,19 +60,23 @@ static int32_t count_trailing_ones(uint32_t x) {
 /* Get N bits */
 #define nbits(N) (ithbit(N) - 1)
 
-/* Copy a regsiter allocator */
+/* Copy a register allocator */
 void janetc_regalloc_clone(JanetcRegisterAllocator *dest, JanetcRegisterAllocator *src) {
     size_t size;
     dest->count = src->count;
     dest->capacity = src->capacity;
     dest->max = src->max;
     size = sizeof(uint32_t) * dest->capacity;
-    dest->chunks = malloc(size);
     dest->regtemps = 0;
-    if (!dest->chunks) {
-        JANET_OUT_OF_MEMORY;
+    if (size) {
+        dest->chunks = malloc(size);
+        if (!dest->chunks) {
+            JANET_OUT_OF_MEMORY;
+        }
+        memcpy(dest->chunks, src->chunks, size);
+    } else {
+        dest->chunks = NULL;
     }
-    memcpy(dest->chunks, src->chunks, size);
 }
 
 /* Allocate one more chunk in chunks */
@@ -153,78 +160,3 @@ void janetc_regalloc_freetemp(JanetcRegisterAllocator *ra, int32_t reg, JanetcRe
     if (reg < 0xF0)
         janetc_regalloc_free(ra, reg);
 }
-
-/* Disable multi-slot allocation for now. */
-
-/*
-static int32_t checkrange(JanetcRegisterAllocator *ra, int32_t start, int32_t end) {
-    int32_t startchunk = start / 32;
-    int32_t endchunk = end / 32;
-    for (int32_t chunk = startchunk; chunk <= endchunk; chunk++) {
-        while (ra->count <= chunk) pushchunk(ra);
-        uint32_t mask = 0xFFFFFFFF;
-        if (chunk == startchunk)
-            mask &= ~nbits(start & 0x1F);
-        if (chunk == endchunk)
-            mask &= nbits(end & 0x1F);
-        uint32_t block = ra->chunks[chunk];
-        uint32_t masking = mask & block;
-        if (masking) {
-            int32_t nextbit = (block == 0xFFFFFFFF)
-                ? 32
-                : count_trailing_zeros(masking) + 1;
-            return chunk * 32 + nextbit;
-        }
-    }
-    return -1;
-}
-
-static void markrange(JanetcRegisterAllocator *ra, int32_t start, int32_t end) {
-    int32_t startchunk = start / 32;
-    int32_t endchunk = end / 32;
-    for (int32_t chunk = startchunk; chunk <= endchunk; chunk++) {
-        uint32_t mask = 0xFFFFFFFF;
-        if (chunk == startchunk)
-            mask &= ~nbits(start & 0x1F);
-        if (chunk == endchunk)
-            mask &= nbits(end & 0x1F);
-        ra->chunks[chunk] |= mask;
-    }
-}
-
-void janetc_regalloc_freerange(JanetcRegisterAllocator *ra, int32_t start, int32_t n) {
-    int32_t end = start + n - 1;
-    int32_t startchunk = start / 32;
-    int32_t endchunk = end / 32;
-    for (int32_t chunk = startchunk; chunk <= endchunk; chunk++) {
-        uint32_t mask = 0;
-        if (chunk == startchunk)
-            mask |= nbits(start & 0x1F);
-        if (chunk == endchunk)
-            mask |= ~nbits(end & 0x1F);
-        ra->chunks[chunk] &= mask;
-    }
-}
-
-int32_t janetc_regalloc_n(JanetcRegisterAllocator *ra, int32_t n) {
-    int32_t start = 0, end = 0, next = 0;
-    while (next >= 0) {
-        start = next;
-        end = start + n - 1;
-        next = checkrange(ra, start, end);
-    }
-    markrange(ra, start, end);
-    if (end > ra->max)
-        ra->max = end;
-    return start;
-}
-
-int32_t janetc_regalloc_call(JanetcRegisterAllocator *ra, int32_t callee, int32_t nargs) {
-    if (checkrange(ra, callee, callee + nargs) < 0) {
-        markrange(ra, callee + 1, callee + nargs);
-        return callee;
-    }
-    return janetc_regalloc_n(ra, nargs + 1);
-}
-
-*/

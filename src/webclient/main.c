@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,7 +20,7 @@
 * IN THE SOFTWARE.
 */
 
-#include <janet/janet.h>
+#include <janet.h>
 #include <emscripten.h>
 
 extern const unsigned char *janet_gen_webinit;
@@ -32,11 +32,11 @@ static const uint8_t *line_prompt = NULL;
 
 /* Yield to JS event loop from janet. Takes a repl prompt
  * and a buffer to fill with input data. */
-static int repl_yield(JanetArgs args) {
-    JANET_FIXARITY(args, 2);
-    JANET_ARG_STRING(line_prompt, args, 0);
-    JANET_ARG_BUFFER(line_buffer, args, 1);
-    JANET_RETURN_NIL(args);
+static Janet repl_yield(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 2);
+    line_prompt = janet_getstring(argv, 0);
+    line_buffer = janet_getbuffer(argv, 1);
+    return janet_wrap_nil();
 }
 
 /* Re-enter the loop */
@@ -44,7 +44,7 @@ static int enter_loop(void) {
     Janet ret;
     JanetSignal status = janet_continue(repl_fiber, janet_wrap_nil(), &ret);
     if (status == JANET_SIGNAL_ERROR) {
-        janet_stacktrace(repl_fiber, "runtime", ret);
+        janet_stacktrace(repl_fiber, ret);
         janet_deinit();
         repl_fiber = NULL;
         return 1;
@@ -52,18 +52,15 @@ static int enter_loop(void) {
     return 0;
 }
 
-/* Allow JS interop from within janet */
-static int cfun_js(JanetArgs args) {
-    const uint8_t *bytes;
-    int32_t len;
-    JANET_FIXARITY(args, 1);
-    JANET_ARG_BYTES(bytes, len, args, 0);
-    (void) len;
-    emscripten_run_script((const char *)bytes);
-    JANET_RETURN_NIL(args);
+/* Allow JS interoperation from within janet */
+static Janet cfun_js(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetByteView bytes = janet_getbytes(argv, 0);
+    emscripten_run_script((const char *)bytes.bytes);
+    return janet_wrap_nil();
 }
 
-/* Intialize the repl */
+/* Initialize the repl */
 EMSCRIPTEN_KEEPALIVE
 void repl_init(void) {
     int status;
@@ -73,7 +70,7 @@ void repl_init(void) {
     janet_init();
     janet_register("repl-yield", repl_yield);
     janet_register("js", cfun_js);
-    env = janet_core_env();
+    env = janet_core_env(NULL);
 
     janet_def(env, "repl-yield", janet_wrap_cfunction(repl_yield), NULL);
     janet_def(env, "js", janet_wrap_cfunction(cfun_js), NULL);

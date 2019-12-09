@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2017 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,8 +23,10 @@
 #ifndef JANET_COMPILE_H
 #define JANET_COMPILE_H
 
-#include <janet/janet.h>
+#ifndef JANET_AMALG
+#include <janet.h>
 #include "regalloc.h"
+#endif
 
 /* Tags for some functions for the prepared inliner */
 #define JANET_FUN_DEBUG 1
@@ -32,7 +34,7 @@
 #define JANET_FUN_APPLY 3
 #define JANET_FUN_YIELD 4
 #define JANET_FUN_RESUME 5
-#define JANET_FUN_GET 6
+#define JANET_FUN_IN 6
 #define JANET_FUN_PUT 7
 #define JANET_FUN_LENGTH 8
 #define JANET_FUN_ADD 9
@@ -58,6 +60,8 @@
 #define JANET_FUN_LTE 29
 #define JANET_FUN_EQ 30
 #define JANET_FUN_NEQ 31
+#define JANET_FUN_PROP 32
+#define JANET_FUN_GET 33
 
 /* Compiler typedefs */
 typedef struct JanetCompiler JanetCompiler;
@@ -94,6 +98,7 @@ struct JanetSlot {
 #define JANET_SCOPE_TOP 4
 #define JANET_SCOPE_UNUSED 8
 #define JANET_SCOPE_CLOSURE 16
+#define JANET_SCOPE_WHILE 32
 
 /* A symbol and slot pair */
 typedef struct SymPair {
@@ -128,9 +133,6 @@ struct JanetScope {
      * to which index to get the environment from in the parent. The environment
      * that corresponds to the direct parent's stack will always have value 0. */
     int32_t *envs;
-
-    /* Where to add reference to self in constants */
-    int32_t selfconst;
 
     int32_t bytecode_start;
     int flags;
@@ -178,13 +180,13 @@ JanetFopts janetc_fopts_default(JanetCompiler *c);
 /* For optimizing builtin normal functions. */
 struct JanetFunOptimizer {
     int (*can_optimize)(JanetFopts opts, JanetSlot *args);
-    JanetSlot (*optimize)(JanetFopts opts, JanetSlot *args);
+    JanetSlot(*optimize)(JanetFopts opts, JanetSlot *args);
 };
 
 /* A grouping of a named special and the corresponding compiler fragment */
 struct JanetSpecial {
     const char *name;
-    JanetSlot (*compile)(JanetFopts opts, int32_t argn, const Janet *argv);
+    JanetSlot(*compile)(JanetFopts opts, int32_t argn, const Janet *argv);
 };
 
 /****************************************************/
@@ -213,7 +215,7 @@ JanetSlot *janetc_toslots(JanetCompiler *c, const Janet *vals, int32_t len);
 JanetSlot *janetc_toslotskv(JanetCompiler *c, Janet ds);
 
 /* Push slots load via janetc_toslots. */
-void janetc_pushslots(JanetCompiler *c, JanetSlot *slots);
+int32_t janetc_pushslots(JanetCompiler *c, JanetSlot *slots);
 
 /* Free slots loaded via janetc_toslots */
 void janetc_freeslots(JanetCompiler *c, JanetSlot *slots);
@@ -239,11 +241,5 @@ JanetSlot janetc_cslot(Janet x);
 
 /* Search for a symbol */
 JanetSlot janetc_resolve(JanetCompiler *c, const uint8_t *sym);
-
-/* Compile a symbol (or mutltisym) when used as an rvalue. */
-JanetSlot janetc_sym_rvalue(JanetFopts opts, const uint8_t *sym);
-
-/* Compile an assignment to a symbol (or multisym) */
-JanetSlot janetc_sym_lvalue(JanetFopts opts, const uint8_t *sym, Janet value);
 
 #endif

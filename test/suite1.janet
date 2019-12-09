@@ -1,5 +1,5 @@
-# Copyright (c) 2018 Calvin Rose
-
+# Copyright (c) 2019 Calvin Rose
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
 # deal in the Software without restriction, including without limitation the
@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-(import test/helper :prefix "" :exit true)
+(import ./helper :prefix "" :exit true)
 (start-suite 1)
 
 (assert (= 400 (math/sqrt 160000)) "sqrt(160000)=400")
@@ -95,10 +95,10 @@
 
 # Find the maximum path from the top (root)
 # of the triangle to the leaves of the triangle.
-  
+
 (defn myfold [xs ys]
-  (let [xs1 (tuple/prepend xs 0)
-        xs2 (tuple/append xs 0)
+  (let [xs1 [;xs 0]
+        xs2 [0 ;xs]
         m1 (map + xs1 ys)
         m2 (map + xs2 ys)]
     (map max m1 m2)))
@@ -140,7 +140,7 @@
 
 # Marshal
 
-(def um-lookup (env-lookup _env))
+(def um-lookup (env-lookup (fiber/getenv (fiber/current))))
 (def m-lookup (invert um-lookup))
 
 (defn testmarsh [x msg]
@@ -154,6 +154,10 @@
 (testmarsh 1 "marshal small integers")
 (testmarsh -1 "marshal integers (-1)")
 (testmarsh 199 "marshal small integers (199)")
+(testmarsh 5000 "marshal medium integers (5000)")
+(testmarsh -5000 "marshal small integers (-5000)")
+(testmarsh 10000 "marshal large integers (10000)")
+(testmarsh -10000 "marshal large integers (-10000)")
 (testmarsh 1.0 "marshal double")
 (testmarsh "doctordolittle" "marshal string")
 (testmarsh :chickenshwarma "marshal symbol")
@@ -171,10 +175,14 @@
 (testmarsh (fiber/new (fn [] (yield 1) 2)) "marshal simple fiber 1")
 (testmarsh (fiber/new (fn [&] (yield 1) 2)) "marshal simple fiber 2")
 
+(def strct {:a @[nil]})
+(put (strct :a) 0 strct)
+(testmarsh strct "cyclic struct")
+
 # Large functions
 (def manydefs (seq [i :range [0 300]] (tuple 'def (gensym) (string "value_" i))))
 (array/push manydefs (tuple * 10000 3 5 7 9))
-(def f (compile (tuple/prepend manydefs 'do) *env*))
+(def f (compile ['do ;manydefs] (fiber/getenv (fiber/current))))
 (assert (= (f) (* 10000 3 5 7 9)) "long function compilation")
 
 # Some higher order functions and macros
@@ -190,7 +198,7 @@
 (assert (= '[2 -2 2 0.5] (myfun 2)) "juxt")
 
 # Case statements
-(assert 
+(assert
   (= :six (case (+ 1 2 3)
             1 :one
             2 :two
@@ -208,17 +216,20 @@
 (def xs (apply tuple (seq [x :range [0 10] :when (even? x)] (tuple (/ x 2) x))))
 (assert (= xs '((0 0) (1 2) (2 4) (3 6) (4 8))) "seq macro 1")
 
+(def xs (apply tuple (seq [x :down [8 -2] :when (even? x)] (tuple (/ x 2) x))))
+(assert (= xs '((4 8) (3 6) (2 4) (1 2) (0 0))) "seq macro 2")
+
 # Some testing for not=
 (assert (not= 1 1 0) "not= 1")
 (assert (not= 0 1 1) "not= 2")
 
 # Closure in while loop
 (def closures (seq [i :range [0 5]] (fn [] i)))
-(assert (= 0 (closures.0)) "closure in loop 0")
-(assert (= 1 (closures.1)) "closure in loop 1")
-(assert (= 2 (closures.2)) "closure in loop 2")
-(assert (= 3 (closures.3)) "closure in loop 3")
-(assert (= 4 (closures.4)) "closure in loop 4")
+(assert (= 0 ((get closures 0))) "closure in loop 0")
+(assert (= 1 ((get closures 1))) "closure in loop 1")
+(assert (= 2 ((get closures 2))) "closure in loop 2")
+(assert (= 3 ((get closures 3))) "closure in loop 3")
+(assert (= 4 ((get closures 4))) "closure in loop 4")
 
 # More numerical tests
 (assert (== 1 1.0) "numerical equal 1")
@@ -238,7 +249,7 @@
 (def arr (array))
 (array/push arr :hello)
 (array/push arr :world)
-(assert (array= arr @[:hello :world]) "array comparision")
+(assert (array= arr @[:hello :world]) "array comparison")
 (assert (array= @[1 2 3 4 5] @[1 2 3 4 5]) "array comparison 2")
 (assert (array= @[:one :two :three :four :five] @[:one :two :three :four :five]) "array comparison 3")
 (assert (array= (array/slice @[1 2 3] 0 2) @[1 2]) "array/slice 1")

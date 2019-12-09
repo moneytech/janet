@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -29,23 +29,22 @@ static int is_symbol_char_gen(uint8_t c) {
     if (c >= 'A' && c <= 'Z') return 1;
     if (c >= '0' && c <= '9') return 1;
     return (c == '!' ||
-        c == '$' ||
-        c == '%' ||
-        c == '&' ||
-        c == '*' ||
-        c == '+' ||
-        c == '-' ||
-        c == '.' ||
-        c == '/' ||
-        c == ':' ||
-        c == '<' ||
-        c == '?' ||
-        c == '=' ||
-        c == '>' ||
-        c == '@' ||
-        c == '^' ||
-        c == '_' ||
-        c == '|');
+            c == '$' ||
+            c == '%' ||
+            c == '&' ||
+            c == '*' ||
+            c == '+' ||
+            c == '-' ||
+            c == '.' ||
+            c == '/' ||
+            c == ':' ||
+            c == '<' ||
+            c == '?' ||
+            c == '=' ||
+            c == '>' ||
+            c == '@' ||
+            c == '^' ||
+            c == '_');
 }
 
 int main() {

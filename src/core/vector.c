@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,40 +20,21 @@
 * IN THE SOFTWARE.
 */
 
+#ifndef JANET_AMALG
 #include "vector.h"
+#include "util.h"
+#endif
 
 /* Grow the buffer dynamically. Used for push operations. */
 void *janet_v_grow(void *v, int32_t increment, int32_t itemsize) {
     int32_t dbl_cur = (NULL != v) ? 2 * janet_v__cap(v) : 0;
     int32_t min_needed = janet_v_count(v) + increment;
     int32_t m = dbl_cur > min_needed ? dbl_cur : min_needed;
-    int32_t *p = (int32_t *) realloc(v ? janet_v__raw(v) : 0, itemsize * m + sizeof(int32_t)*2);
-    if (NULL != p) {
-        if (!v) p[1] = 0;
-        p[0] = m;
-        return p + 2;
-   } else {
-       {
-           JANET_OUT_OF_MEMORY;
-       }
-       return (void *) (2 * sizeof(int32_t));
-   }
-}
-
-/* Clone a buffer. */
-void *janet_v_copymem(void *v, int32_t itemsize) {
-    int32_t *p;
-    if (NULL == v) return NULL;
-    p = malloc(2 * sizeof(int32_t) + itemsize * janet_v__cap(v));
-    if (NULL != p) {
-        memcpy(p, janet_v__raw(v), 2 * sizeof(int32_t) + itemsize * janet_v__cnt(v));
-        return p + 2;
-    } else {
-       {
-           JANET_OUT_OF_MEMORY;
-       }
-       return (void *) (2 * sizeof(int32_t));
-    }
+    size_t newsize = ((size_t) itemsize) * m + sizeof(int32_t) * 2;
+    int32_t *p = (int32_t *) janet_srealloc(v ? janet_v__raw(v) : 0, newsize);
+    if (!v) p[1] = 0;
+    p[0] = m;
+    return p + 2;
 }
 
 /* Convert a buffer to normal allocated memory (forget capacity) */
@@ -67,10 +48,10 @@ void *janet_v_flattenmem(void *v, int32_t itemsize) {
         memcpy(p, v, sizen);
         return p;
     } else {
-       {
-           JANET_OUT_OF_MEMORY;
-       }
-       return NULL;
+        {
+            JANET_OUT_OF_MEMORY;
+        }
+        return NULL;
     }
 }
 

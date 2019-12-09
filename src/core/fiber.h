@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,7 +23,9 @@
 #ifndef JANET_FIBER_H_defined
 #define JANET_FIBER_H_defined
 
-#include <janet/janet.h>
+#ifndef JANET_AMALG
+#include <janet.h>
+#endif
 
 extern JANET_THREAD_LOCAL JanetFiber *janet_vm_fiber;
 

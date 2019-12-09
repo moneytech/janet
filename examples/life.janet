@@ -4,11 +4,11 @@
   (seq [x :range [-1 2]
          y :range [-1 2]
          :when (not (and (zero? x) (zero? y)))]
-        (tuple x y)))
+       [x y]))
 
 (defn- neighbors
   [[x y]]
-  (map (fn [[x1 y1]] (tuple (+ x x1) (+ y y1))) window))
+  (map (fn [[x1 y1]] [(+ x x1) (+ y y1)]) window))
 
 (defn tick
   "Get the next state in the Game Of Life."
@@ -16,7 +16,7 @@
   (def cell-set (frequencies state))
   (def neighbor-set (frequencies (mapcat neighbors state)))
   (seq [coord :keys neighbor-set
-         :let [count neighbor-set.coord]
+         :let [count (get neighbor-set coord)]
          :when (or (= count 3) (and (get cell-set coord) (= count 2)))]
       coord))
 
@@ -24,11 +24,11 @@
   "Draw cells in the game of life from (x1, y1) to (x2, y2)"
   [state x1 y1 x2 y2]
   (def cellset @{})
-  (each cell state (set cellset.cell true))
+  (each cell state (put cellset cell true))
   (loop [x :range [x1 (+ 1 x2)]
          :after (print)
          y :range [y1 (+ 1 y2)]]
-    (file/write stdout (if (get cellset (tuple x y)) "X " ". ")))
+    (file/write stdout (if (get cellset [x y]) "X " ". ")))
   (print))
 
 #

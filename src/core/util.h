@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,7 +23,42 @@
 #ifndef JANET_UTIL_H_defined
 #define JANET_UTIL_H_defined
 
-#include <janet/janet.h>
+#include <stdio.h>
+#include <errno.h>
+
+#ifndef JANET_AMALG
+#include <janet.h>
+#endif
+
+/* Handle runtime errors */
+#ifndef janet_exit
+#include <stdio.h>
+#define janet_exit(m) do { \
+    printf("C runtime error at line %d in file %s: %s\n",\
+        __LINE__,\
+        __FILE__,\
+        (m));\
+    exit(1);\
+} while (0)
+#endif
+
+#define janet_assert(c, m) do { \
+    if (!(c)) janet_exit((m)); \
+} while (0)
+
+/* What to do when out of memory */
+#ifndef JANET_OUT_OF_MEMORY
+#include <stdio.h>
+#define JANET_OUT_OF_MEMORY do { printf("janet out of memory\n"); exit(1); } while (0)
+#endif
+
+/* Omit docstrings in some builds */
+#ifndef JANET_BOOTSTRAP
+#define JDOC(x) NULL
+#define JANET_NO_BOOTSTRAP
+#else
+#define JDOC(x) x
+#endif
 
 /* Utils */
 #define janet_maphash(cap, hash) ((uint32_t)(hash) & (cap - 1))
@@ -35,28 +70,55 @@ int32_t janet_tablen(int32_t n);
 void janet_buffer_push_types(JanetBuffer *buffer, int types);
 const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key);
 Janet janet_dict_get(const JanetKV *buckets, int32_t cap, Janet key);
+void janet_memempty(JanetKV *mem, int32_t count);
+void *janet_memalloc_empty(int32_t count);
 const void *janet_strbinsearch(
-        const void *tab,
-        size_t tabcount,
-        size_t itemsize,
-        const uint8_t *key);
+    const void *tab,
+    size_t tabcount,
+    size_t itemsize,
+    const uint8_t *key);
+void janet_buffer_format(
+    JanetBuffer *b,
+    const char *strfrmt,
+    int32_t argstart,
+    int32_t argc,
+    Janet *argv);
+
+/* Inside the janet core, defining globals is different
+ * at bootstrap time and normal runtime */
+#ifdef JANET_BOOTSTRAP
+#define janet_core_def janet_def
+#define janet_core_cfuns janet_cfuns
+#else
+void janet_core_def(JanetTable *env, const char *name, Janet x, const void *p);
+void janet_core_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns);
+#endif
 
 /* Initialize builtin libraries */
-int janet_lib_io(JanetArgs args);
-int janet_lib_math(JanetArgs args);
-int janet_lib_array(JanetArgs args);
-int janet_lib_tuple(JanetArgs args);
-int janet_lib_buffer(JanetArgs args);
-int janet_lib_table(JanetArgs args);
-int janet_lib_fiber(JanetArgs args);
-int janet_lib_os(JanetArgs args);
-int janet_lib_string(JanetArgs args);
-int janet_lib_marsh(JanetArgs args);
-int janet_lib_parse(JanetArgs args);
+void janet_lib_io(JanetTable *env);
+void janet_lib_math(JanetTable *env);
+void janet_lib_array(JanetTable *env);
+void janet_lib_tuple(JanetTable *env);
+void janet_lib_buffer(JanetTable *env);
+void janet_lib_table(JanetTable *env);
+void janet_lib_fiber(JanetTable *env);
+void janet_lib_os(JanetTable *env);
+void janet_lib_string(JanetTable *env);
+void janet_lib_marsh(JanetTable *env);
+void janet_lib_parse(JanetTable *env);
 #ifdef JANET_ASSEMBLER
-int janet_lib_asm(JanetArgs args);
+void janet_lib_asm(JanetTable *env);
 #endif
-int janet_lib_compile(JanetArgs args);
-int janet_lib_debug(JanetArgs args);
+void janet_lib_compile(JanetTable *env);
+void janet_lib_debug(JanetTable *env);
+#ifdef JANET_PEG
+void janet_lib_peg(JanetTable *env);
+#endif
+#ifdef JANET_TYPED_ARRAY
+void janet_lib_typed_array(JanetTable *env);
+#endif
+#ifdef JANET_INT_TYPES
+void janet_lib_inttypes(JanetTable *env);
+#endif
 
 #endif

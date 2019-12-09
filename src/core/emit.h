@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018 Calvin Rose
+* Copyright (c) 2019 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,7 +23,9 @@
 #ifndef JANET_EMIT_H
 #define JANET_EMIT_H
 
+#ifndef JANET_AMALG
 #include "compile.h"
+#endif
 
 void janetc_emit(JanetCompiler *c, uint32_t instr);
 

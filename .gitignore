@@ -4,6 +4,7 @@ dst
 janet
 !*/**/janet
 /build
+/builddir
 /Build
 /Release
 /Debug
@@ -11,6 +12,22 @@ janet
 /src/include/generated/*.h
 janet-*.tar.gz
 dist
+
+# Kakoune (fzf via fd)
+.fdignore
+
+# VSCode
+.vscode
+
+# Eclipse
+.project
+.cproject
+
+# Gnome Builder
+.buildconfig
+
+# Local directory for testing
+local
 
 # Emscripten
 *.bc
@@ -39,6 +56,7 @@ tags
 
 # Valgrind files
 vgcore.*
+*.out.*
 
 # Created by https://www.gitignore.io/api/c
 

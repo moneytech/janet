@@ -1,4 +1,4 @@
-# Copyright (c) 2018 Calvin Rose
+# Copyright (c) 2019 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-(import test/helper :prefix "" :exit true)
+(import ./helper :prefix "" :exit true)
 (start-suite 0)
 
 (assert (= 10 (+ 1 2 3 4)) "addition")
@@ -37,10 +37,11 @@
 (assert (= 7 (% 20 13)) "modulo 1")
 (assert (= -7 (% -20 13)) "modulo 2")
 
-(assert (order< nil false true
+(assert (order< 1.0 nil false true
                 (fiber/new (fn [] 1))
-                1.0 "hi"
+                "hi"
                 (quote hello)
+                :hello
                 (array 1 2 3)
                 (tuple 1 2 3)
                 (table "a" "b" "c" "d")
@@ -54,6 +55,8 @@
 (assert (= (get @{} 1) nil) "get nil from empty table")
 (assert (= (get {:boop :bap} :boop) :bap) "get non nil from struct")
 (assert (= (get @{:boop :bap} :boop) :bap) "get non nil from table")
+(assert (= (get @"\0" 0) 0) "get non nil from buffer")
+(assert (= (get @"\0" 1) nil) "get nil from buffer oob")
 (assert (put @{} :boop :bap) "can add to empty table")
 (assert (put @{1 3} :boop :bap) "can add to non-empty table")
 
@@ -78,7 +81,7 @@
 (assert (= "\e" "\x1B") "escape character")
 (assert (= "\x09" "\t") "tab character")
 
-# Mcarthy's 91 function
+# McCarthy's 91 function
 (var f91 nil)
 (set f91 (fn [n] (if (> n 100) (- n 10) (f91 (f91 (+ n 11))))))
 (assert (= 91 (f91 10)) "f91(10) = 91")
@@ -201,7 +204,7 @@
 
 (def 🦊 :fox)
 (def 🐮 :cow)
-(assert (= (string "🐼" 🦊 🐮) "🐼:fox:cow") "emojis 🙉 :)")
+(assert (= (string "🐼" 🦊 🐮) "🐼foxcow") "emojis 🙉 :)")
 (assert (not= 🦊 "🦊") "utf8 strings are not symbols and vice versa")
 
 # Symbols with @ character
@@ -216,7 +219,7 @@
 # Merge sort
 
 # Imperative (and verbose) merge sort merge
-(defn merge 
+(defn merge
   [xs ys]
   (def ret @[])
   (def xlen (length xs))
@@ -281,6 +284,40 @@
     (++ i)
     (++ i))
   (assert (= i 6) "when macro"))
+
+# Denormal tables and structs
+
+(assert (= (length {1 2 nil 3}) 1) "nil key struct literal")
+(assert (= (length @{1 2 nil 3}) 1) "nil key table literal")
+(assert (= (length (struct 1 2 nil 3)) 1) "nil key struct ctor")
+(assert (= (length (table 1 2 nil 3)) 1) "nil key table ctor")
+
+(assert (= (length (struct (/ 0 0) 2 1 3)) 1) "nan key struct ctor")
+(assert (= (length (table (/ 0 0) 2 1 3)) 1) "nan key table ctor")
+(assert (= (length {1 2 nil 3}) 1) "nan key struct literal")
+(assert (= (length @{1 2 nil 3}) 1) "nan key table literal")
+
+(assert (= (length (struct 2 1 3 nil)) 1) "nil value struct ctor")
+(assert (= (length (table 2 1 3 nil)) 1) "nil value table ctor")
+(assert (= (length {1 2 3 nil}) 1) "nil value struct literal")
+(assert (= (length @{1 2 3 nil}) 1) "nil value table literal")
+
+# Regression Test
+(assert (= 1 (((compile '(fn [] 1) @{})))) "regression test")
+
+# Regression Test #137
+(def [a b c] (range 10))
+(assert (= a 0) "regression #137 (1)")
+(assert (= b 1) "regression #137 (2)")
+(assert (= c 2) "regression #137 (3)")
+
+(var [x y z] (range 10))
+(assert (= x 0) "regression #137 (4)")
+(assert (= y 1) "regression #137 (5)")
+(assert (= z 2) "regression #137 (6)")
+
+(assert (= true ;(map truthy? [0 "" true @{} {} [] '()])) "truthy values")
+(assert (= false ;(map truthy? [nil false])) "non-truthy values")
 
 (end-suite)
 
