@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -40,13 +40,14 @@
  * '0xdeadbeef'.
  */
 
-#include <math.h>
-#include <string.h>
-
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "util.h"
 #endif
+
+#include <math.h>
+#include <string.h>
 
 /* Lookup table for getting values of characters when parsing numbers. Handles
  * digits 0-9 and a-z (and A-Z). A-Z have values of 10 to 35. */
@@ -86,7 +87,7 @@ static uint32_t *bignat_extra(struct BigNat *mant, int32_t n) {
     int32_t newn = oldn + n;
     if (mant->cap < newn) {
         int32_t newcap = 2 * newn;
-        uint32_t *mem = realloc(mant->digits, newcap * sizeof(uint32_t));
+        uint32_t *mem = realloc(mant->digits, (size_t) newcap * sizeof(uint32_t));
         if (NULL == mem) {
             JANET_OUT_OF_MEMORY;
         }
@@ -207,9 +208,9 @@ static double convert(
 
     /* Approximate exponent in base 2 of mant and exponent. This should get us a good estimate of the final size of the
      * number, within * 2^32 or so. */
-    int32_t mant_exp2_approx = mant->n * 32 + 16;
-    int32_t exp_exp2_approx = (int32_t)(floor(log2(base) * exponent));
-    int32_t exp2_approx = mant_exp2_approx + exp_exp2_approx;
+    int64_t mant_exp2_approx = mant->n * 32 + 16;
+    int64_t exp_exp2_approx = (int64_t)(floor(log2(base) * exponent));
+    int64_t exp2_approx = mant_exp2_approx + exp_exp2_approx;
 
     /* Short circuit zero, huge, and small numbers. We use the exponent range of valid IEEE754 doubles (-1022, 1023)
      * with a healthy buffer to allow for inaccuracies in the approximation and denormailzed numbers. */
@@ -446,12 +447,16 @@ int janet_scan_int64(const uint8_t *str, int32_t len, int64_t *out) {
     int neg;
     uint64_t bi;
     if (scan_uint64(str, len, &bi, &neg)) {
-        if (neg && bi <= 0x8000000000000000ULL) {
-            *out = -((int64_t) bi);
+        if (neg && bi <= (UINT64_MAX / 2)) {
+            if (bi > INT64_MAX) {
+                *out = INT64_MIN;
+            } else {
+                *out = -((int64_t) bi);
+            }
             return 1;
         }
-        if (!neg && bi <= 0x7FFFFFFFFFFFFFFFULL) {
-            *out = bi;
+        if (!neg && bi <= INT64_MAX) {
+            *out = (int64_t) bi;
             return 1;
         }
     }

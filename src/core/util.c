@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,14 +20,18 @@
 * IN THE SOFTWARE.
 */
 
-#include <inttypes.h>
-
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "util.h"
 #include "state.h"
 #include "gc.h"
+#ifdef JANET_WINDOWS
+#include <windows.h>
 #endif
+#endif
+
+#include <inttypes.h>
 
 /* Base 64 lookup table for digits */
 const char janet_base64[65] =
@@ -93,7 +97,7 @@ const char *const janet_status_names[16] = {
     "alive"
 };
 
-/* Calculate hash for string */
+#ifdef JANET_NO_PRF
 
 int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
     const uint8_t *end = str + len;
@@ -102,6 +106,118 @@ int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
         hash = (hash << 5) + hash + *str++;
     return (int32_t) hash;
 }
+
+#else
+
+/*
+  Public domain siphash implementation sourced from:
+
+  https://raw.githubusercontent.com/veorq/SipHash/master/halfsiphash.c
+
+  We have made a few alterations, such as hardcoding the output size
+  and then removing dead code.
+*/
+#define cROUNDS 2
+#define dROUNDS 4
+
+#define ROTL(x, b) (uint32_t)(((x) << (b)) | ((x) >> (32 - (b))))
+
+#define U8TO32_LE(p)                                                           \
+    (((uint32_t)((p)[0])) | ((uint32_t)((p)[1]) << 8) |                        \
+     ((uint32_t)((p)[2]) << 16) | ((uint32_t)((p)[3]) << 24))
+
+#define SIPROUND                                                               \
+    do {                                                                       \
+        v0 += v1;                                                              \
+        v1 = ROTL(v1, 5);                                                      \
+        v1 ^= v0;                                                              \
+        v0 = ROTL(v0, 16);                                                     \
+        v2 += v3;                                                              \
+        v3 = ROTL(v3, 8);                                                      \
+        v3 ^= v2;                                                              \
+        v0 += v3;                                                              \
+        v3 = ROTL(v3, 7);                                                      \
+        v3 ^= v0;                                                              \
+        v2 += v1;                                                              \
+        v1 = ROTL(v1, 13);                                                     \
+        v1 ^= v2;                                                              \
+        v2 = ROTL(v2, 16);                                                     \
+    } while (0)
+
+static uint32_t halfsiphash(const uint8_t *in, const size_t inlen, const uint8_t *k) {
+
+    uint32_t v0 = 0;
+    uint32_t v1 = 0;
+    uint32_t v2 = UINT32_C(0x6c796765);
+    uint32_t v3 = UINT32_C(0x74656462);
+    uint32_t k0 = U8TO32_LE(k);
+    uint32_t k1 = U8TO32_LE(k + 4);
+    uint32_t m;
+    int i;
+    const uint8_t *end = in + inlen - (inlen % sizeof(uint32_t));
+    const int left = inlen & 3;
+    uint32_t b = ((uint32_t)inlen) << 24;
+    v3 ^= k1;
+    v2 ^= k0;
+    v1 ^= k1;
+    v0 ^= k0;
+
+    for (; in != end; in += 4) {
+        m = U8TO32_LE(in);
+        v3 ^= m;
+
+        for (i = 0; i < cROUNDS; ++i)
+            SIPROUND;
+
+        v0 ^= m;
+    }
+
+    switch (left) {
+        case 3:
+            b |= ((uint32_t)in[2]) << 16;
+        /* fallthrough */
+        case 2:
+            b |= ((uint32_t)in[1]) << 8;
+        /* fallthrough */
+        case 1:
+            b |= ((uint32_t)in[0]);
+            break;
+        case 0:
+            break;
+    }
+
+    v3 ^= b;
+
+    for (i = 0; i < cROUNDS; ++i)
+        SIPROUND;
+
+    v0 ^= b;
+
+    v2 ^= 0xff;
+
+    for (i = 0; i < dROUNDS; ++i)
+        SIPROUND;
+
+    b = v1 ^ v3;
+    return b;
+}
+/* end of siphash */
+
+static uint8_t hash_key[JANET_HASH_KEY_SIZE] = {0};
+
+void janet_init_hash_key(uint8_t new_key[JANET_HASH_KEY_SIZE]) {
+    memcpy(hash_key, new_key, sizeof(hash_key));
+}
+
+/* Calculate hash for string */
+
+int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
+    uint32_t hash;
+    hash = halfsiphash(str, len, hash_key);
+    return (int32_t)hash;
+}
+
+#endif
 
 /* Computes hash of an array of values */
 int32_t janet_array_calchash(const Janet *array, int32_t len) {
@@ -133,6 +249,12 @@ int32_t janet_tablen(int32_t n) {
     n |= n >> 8;
     n |= n >> 16;
     return n + 1;
+}
+
+/* Avoid some undefined behavior that was common in the code base. */
+void safe_memcpy(void *dest, const void *src, size_t len) {
+    if (!len) return;
+    memcpy(dest, src, len);
 }
 
 /* Helper to find a value in a Janet struct or table. Returns the bucket
@@ -261,88 +383,89 @@ void janet_var(JanetTable *env, const char *name, Janet val, const char *doc) {
 }
 
 /* Load many cfunctions at once */
-void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) {
+static void _janet_cfuns_prefix(JanetTable *env, const char *regprefix, const JanetReg *cfuns, int defprefix) {
+    uint8_t *longname_buffer = NULL;
+    size_t prefixlen = 0;
+    size_t bufsize = 0;
+    if (NULL != regprefix) {
+        prefixlen = strlen(regprefix);
+        bufsize = prefixlen + 256;
+        longname_buffer = malloc(bufsize);
+        if (NULL == longname_buffer) {
+            JANET_OUT_OF_MEMORY;
+        }
+        safe_memcpy(longname_buffer, regprefix, prefixlen);
+        longname_buffer[prefixlen] = '/';
+        prefixlen++;
+    }
     while (cfuns->name) {
-        Janet name = janet_csymbolv(cfuns->name);
-        Janet longname = name;
-        if (regprefix) {
-            int32_t reglen = 0;
+        Janet name;
+        if (NULL != regprefix) {
             int32_t nmlen = 0;
-            while (regprefix[reglen]) reglen++;
             while (cfuns->name[nmlen]) nmlen++;
-            int32_t symlen = reglen + 1 + nmlen;
-            uint8_t *longname_buffer = malloc(symlen);
-            memcpy(longname_buffer, regprefix, reglen);
-            longname_buffer[reglen] = '/';
-            memcpy(longname_buffer + reglen + 1, cfuns->name, nmlen);
-            longname = janet_wrap_symbol(janet_symbol(longname_buffer, symlen));
-            free(longname_buffer);
+            int32_t totallen = (int32_t) prefixlen + nmlen;
+            if ((size_t) totallen > bufsize) {
+                bufsize = (size_t)(totallen) + 128;
+                longname_buffer = realloc(longname_buffer, bufsize);
+                if (NULL == longname_buffer) {
+                    JANET_OUT_OF_MEMORY;
+                }
+            }
+            safe_memcpy(longname_buffer + prefixlen, cfuns->name, nmlen);
+            name = janet_wrap_symbol(janet_symbol(longname_buffer, totallen));
+        } else {
+            name = janet_csymbolv(cfuns->name);
         }
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
-        janet_def(env, cfuns->name, fun, cfuns->documentation);
-        janet_table_put(janet_vm_registry, fun, longname);
+        if (defprefix) {
+            JanetTable *subt = janet_table(2);
+            janet_table_put(subt, janet_ckeywordv("value"), fun);
+            if (cfuns->documentation)
+                janet_table_put(subt, janet_ckeywordv("doc"), janet_cstringv(cfuns->documentation));
+            janet_table_put(env, name, janet_wrap_table(subt));
+        } else {
+            janet_def(env, cfuns->name, fun, cfuns->documentation);
+        }
+        janet_table_put(janet_vm_registry, fun, name);
         cfuns++;
     }
+    free(longname_buffer);
+}
+
+void janet_cfuns_prefix(JanetTable *env, const char *regprefix, const JanetReg *cfuns) {
+    _janet_cfuns_prefix(env, regprefix, cfuns, 1);
+}
+
+void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) {
+    _janet_cfuns_prefix(env, regprefix, cfuns, 0);
 }
 
 /* Abstract type introspection */
 
-static const JanetAbstractType type_wrap = {
-    "core/type-info",
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
-};
-
-typedef struct {
-    const JanetAbstractType *at;
-} JanetAbstractTypeWrap;
-
 void janet_register_abstract_type(const JanetAbstractType *at) {
-    JanetAbstractTypeWrap *abstract = (JanetAbstractTypeWrap *)
-                                      janet_abstract(&type_wrap, sizeof(JanetAbstractTypeWrap));
-    abstract->at = at;
     Janet sym = janet_csymbolv(at->name);
-    if (!(janet_checktype(janet_table_get(janet_vm_registry, sym), JANET_NIL))) {
+    if (!(janet_checktype(janet_table_get(janet_vm_abstract_registry, sym), JANET_NIL))) {
         janet_panicf("cannot register abstract type %s, "
                      "a type with the same name exists", at->name);
     }
-    janet_table_put(janet_vm_registry, sym, janet_wrap_abstract(abstract));
+    janet_table_put(janet_vm_abstract_registry, sym, janet_wrap_pointer((void *) at));
 }
 
 const JanetAbstractType *janet_get_abstract_type(Janet key) {
-    Janet twrap = janet_table_get(janet_vm_registry, key);
-    if (janet_checktype(twrap, JANET_NIL)) {
+    Janet wrapped = janet_table_get(janet_vm_abstract_registry, key);
+    if (janet_checktype(wrapped, JANET_NIL)) {
         return NULL;
     }
-    if (!janet_checktype(twrap, JANET_ABSTRACT) ||
-            (janet_abstract_type(janet_unwrap_abstract(twrap)) != &type_wrap)) {
-        janet_panic("expected abstract type");
-    }
-    JanetAbstractTypeWrap *w = (JanetAbstractTypeWrap *)janet_unwrap_abstract(twrap);
-    return w->at;
+    return (JanetAbstractType *)(janet_unwrap_pointer(wrapped));
 }
 
 #ifndef JANET_BOOTSTRAP
 void janet_core_def(JanetTable *env, const char *name, Janet x, const void *p) {
     (void) p;
     Janet key = janet_csymbolv(name);
-    Janet value;
-    /* During init, allow replacing core library cfunctions with values from
-     * the env. */
-    Janet check = janet_table_get(env, key);
-    if (janet_checktype(check, JANET_NIL)) {
-        value = x;
-    } else {
-        value = check;
-    }
-    janet_table_put(env, key, value);
-    if (janet_checktype(value, JANET_CFUNCTION)) {
-        janet_table_put(janet_vm_registry, value, key);
+    janet_table_put(env, key, x);
+    if (janet_checktype(x, JANET_CFUNCTION)) {
+        janet_table_put(janet_vm_registry, x, key);
     }
 }
 
@@ -377,6 +500,14 @@ JanetBindingType janet_resolve(JanetTable *env, const uint8_t *sym, Janet *out) 
     }
     *out = janet_table_get(entry_table, janet_ckeywordv("value"));
     return JANET_BINDING_DEF;
+}
+
+/* Resolve a symbol in the core environment. */
+Janet janet_resolve_core(const char *name) {
+    JanetTable *env = janet_core_env(NULL);
+    Janet out = janet_wrap_nil();
+    janet_resolve(env, janet_csymbol(name), &out);
+    return out;
 }
 
 /* Read both tuples and arrays as c pointers + int32_t length. Return 1 if the
@@ -446,6 +577,56 @@ int janet_checksize(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
     double dval = janet_unwrap_number(x);
-    return dval == (double)((size_t) dval) &&
-           dval <= SIZE_MAX;
+    if (dval != (double)((size_t) dval)) return 0;
+    if (SIZE_MAX > JANET_INTMAX_INT64) {
+        return dval <= JANET_INTMAX_INT64;
+    } else {
+        return dval <= SIZE_MAX;
+    }
 }
+
+JanetTable *janet_get_core_table(const char *name) {
+    JanetTable *env = janet_core_env(NULL);
+    Janet out = janet_wrap_nil();
+    JanetBindingType bt = janet_resolve(env, janet_csymbol(name), &out);
+    if (bt == JANET_BINDING_NONE) return NULL;
+    if (!janet_checktype(out, JANET_TABLE)) return NULL;
+    return janet_unwrap_table(out);
+}
+
+/* Clock shims for various platforms */
+#ifdef JANET_GETTIME
+/* For macos */
+#ifdef __MACH__
+#include <mach/clock.h>
+#include <mach/mach.h>
+#endif
+#ifdef JANET_WINDOWS
+int janet_gettime(struct timespec *spec) {
+    FILETIME ftime;
+    GetSystemTimeAsFileTime(&ftime);
+    int64_t wintime = (int64_t)(ftime.dwLowDateTime) | ((int64_t)(ftime.dwHighDateTime) << 32);
+    /* Windows epoch is January 1, 1601 apparently */
+    wintime -= 116444736000000000LL;
+    spec->tv_sec  = wintime / 10000000LL;
+    /* Resolution is 100 nanoseconds. */
+    spec->tv_nsec = wintime % 10000000LL * 100;
+    return 0;
+}
+#elif defined(__MACH__)
+int janet_gettime(struct timespec *spec) {
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    spec->tv_sec = mts.tv_sec;
+    spec->tv_nsec = mts.tv_nsec;
+    return 0;
+}
+#else
+int janet_gettime(struct timespec *spec) {
+    return clock_gettime(CLOCK_REALTIME, spec);
+}
+#endif
+#endif

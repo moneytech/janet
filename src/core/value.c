@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,45 +21,223 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
+#include "util.h"
+#include "state.h"
+#include "gc.h"
 #include <janet.h>
 #endif
+
+JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal = NULL;
+JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal_top = NULL;
+JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal_base = NULL;
+
+static void push_traversal_node(void *lhs, void *rhs, int32_t index2) {
+    JanetTraversalNode node;
+    node.self = (JanetGCObject *) lhs;
+    node.other = (JanetGCObject *) rhs;
+    node.index = 0;
+    node.index2 = index2;
+    if (janet_vm_traversal + 1 >= janet_vm_traversal_top) {
+        size_t oldsize = janet_vm_traversal - janet_vm_traversal_base;
+        size_t newsize = 2 * oldsize + 1;
+        if (newsize < 128) {
+            newsize = 128;
+        }
+        JanetTraversalNode *tn = realloc(janet_vm_traversal_base, newsize * sizeof(JanetTraversalNode));
+        if (tn == NULL) {
+            JANET_OUT_OF_MEMORY;
+        }
+        janet_vm_traversal_base = tn;
+        janet_vm_traversal_top = janet_vm_traversal_base + newsize;
+        janet_vm_traversal = janet_vm_traversal_base + oldsize;
+    }
+    *(++janet_vm_traversal) = node;
+}
+
+/*
+ * Used for travsersing structs and tuples without recursion
+ * Returns:
+ * 0 - next node found
+ * 1 - early stop - lhs < rhs
+ * 2 - no next node found
+ * 3 - early stop - lhs > rhs
+ */
+static int traversal_next(Janet *x, Janet *y) {
+    JanetTraversalNode *t = janet_vm_traversal;
+    while (t && t > janet_vm_traversal_base) {
+        JanetGCObject *self = t->self;
+        JanetTupleHead *tself = (JanetTupleHead *)self;
+        JanetStructHead *sself = (JanetStructHead *)self;
+        JanetGCObject *other = t->other;
+        JanetTupleHead *tother = (JanetTupleHead *)other;
+        JanetStructHead *sother = (JanetStructHead *)other;
+        if ((self->flags & JANET_MEM_TYPEBITS) == JANET_MEMORY_TUPLE) {
+            /* Node is a tuple at index t->index */
+            if (t->index < tself->length && t->index < tother->length) {
+                int32_t index = t->index++;
+                *x = tself->data[index];
+                *y = tother->data[index];
+                janet_vm_traversal = t;
+                return 0;
+            }
+            if (t->index2 && tself->length != tother->length) {
+                return tself->length > tother->length ? 3 : 1;
+            }
+        } else {
+            /* Node is a struct at index t->index: if t->index2 is true, we should return the values. */
+            if (t->index2) {
+                t->index2 = 0;
+                int32_t index = t->index++;
+                *x = sself->data[index].value;
+                *y = sother->data[index].value;
+                janet_vm_traversal = t;
+                return 0;
+            }
+            for (int32_t i = t->index; i < sself->capacity; i++) {
+                t->index2 = 1;
+                *x = sself->data[t->index].key;
+                *y = sother->data[t->index].key;
+                janet_vm_traversal = t;
+                return 0;
+            }
+        }
+        t--;
+    }
+    janet_vm_traversal = t;
+    return 2;
+}
 
 /*
  * Define a number of functions that can be used internally on ANY Janet.
  */
 
-/* Check if two values are equal. This is strict equality with no conversion. */
-int janet_equals(Janet x, Janet y) {
-    int result = 0;
-    if (janet_type(x) != janet_type(y)) {
-        result = 0;
-    } else {
-        switch (janet_type(x)) {
-            case JANET_NIL:
-                result = 1;
+Janet janet_next(Janet ds, Janet key) {
+    JanetType t = janet_type(ds);
+    switch (t) {
+        default:
+            janet_panicf("expected iterable type, got %v", ds);
+        case JANET_TABLE:
+        case JANET_STRUCT: {
+            const JanetKV *start;
+            int32_t cap;
+            if (t == JANET_TABLE) {
+                JanetTable *tab = janet_unwrap_table(ds);
+                cap = tab->capacity;
+                start = tab->data;
+            } else {
+                JanetStruct st = janet_unwrap_struct(ds);
+                cap = janet_struct_capacity(st);
+                start = st;
+            }
+            const JanetKV *end = start + cap;
+            const JanetKV *kv = janet_checktype(key, JANET_NIL)
+                                ? start
+                                : janet_dict_find(start, cap, key) + 1;
+            while (kv < end) {
+                if (!janet_checktype(kv->key, JANET_NIL)) return kv->key;
+                kv++;
+            }
+            break;
+        }
+        case JANET_STRING:
+        case JANET_KEYWORD:
+        case JANET_SYMBOL:
+        case JANET_BUFFER:
+        case JANET_ARRAY:
+        case JANET_TUPLE: {
+            int32_t i;
+            if (janet_checktype(key, JANET_NIL)) {
+                i = 0;
+            } else if (janet_checkint(key)) {
+                i = janet_unwrap_integer(key) + 1;
+            } else {
                 break;
-            case JANET_BOOLEAN:
-                result = (janet_unwrap_boolean(x) == janet_unwrap_boolean(y));
-                break;
-            case JANET_NUMBER:
-                result = (janet_unwrap_number(x) == janet_unwrap_number(y));
-                break;
-            case JANET_STRING:
-                result = janet_string_equal(janet_unwrap_string(x), janet_unwrap_string(y));
-                break;
-            case JANET_TUPLE:
-                result = janet_tuple_equal(janet_unwrap_tuple(x), janet_unwrap_tuple(y));
-                break;
-            case JANET_STRUCT:
-                result = janet_struct_equal(janet_unwrap_struct(x), janet_unwrap_struct(y));
-                break;
-            default:
-                /* compare pointers */
-                result = (janet_unwrap_pointer(x) == janet_unwrap_pointer(y));
-                break;
+            }
+            int32_t len;
+            if (t == JANET_BUFFER) {
+                len = janet_unwrap_buffer(ds)->count;
+            } else if (t == JANET_ARRAY) {
+                len = janet_unwrap_array(ds)->count;
+            } else if (t == JANET_TUPLE) {
+                len = janet_tuple_length(janet_unwrap_tuple(ds));
+            } else {
+                len = janet_string_length(janet_unwrap_string(ds));
+            }
+            if (i < len && i >= 0) {
+                return janet_wrap_integer(i);
+            }
+            break;
+        }
+        case JANET_ABSTRACT: {
+            JanetAbstract abst = janet_unwrap_abstract(ds);
+            const JanetAbstractType *at = janet_abstract_type(abst);
+            if (NULL == at->next) break;
+            return at->next(abst, key);
         }
     }
-    return result;
+    return janet_wrap_nil();
+}
+
+/* Compare two abstract values */
+static int janet_compare_abstract(JanetAbstract xx, JanetAbstract yy) {
+    if (xx == yy) return 0;
+    const JanetAbstractType *xt = janet_abstract_type(xx);
+    const JanetAbstractType *yt = janet_abstract_type(yy);
+    if (xt != yt) {
+        return xt > yt ? 1 : -1;
+    }
+    if (xt->compare == NULL) {
+        return xx > yy ? 1 : -1;
+    }
+    return xt->compare(xx, yy);
+}
+
+int janet_equals(Janet x, Janet y) {
+    janet_vm_traversal = janet_vm_traversal_base;
+    do {
+        if (janet_type(x) != janet_type(y)) return 0;
+        switch (janet_type(x)) {
+            case JANET_NIL:
+                break;
+            case JANET_BOOLEAN:
+                if (janet_unwrap_boolean(x) != janet_unwrap_boolean(y)) return 0;
+                break;
+            case JANET_NUMBER:
+                if (janet_unwrap_number(x) != janet_unwrap_number(y)) return 0;
+                break;
+            case JANET_STRING:
+                if (!janet_string_equal(janet_unwrap_string(x), janet_unwrap_string(y))) return 0;
+                break;
+            case JANET_ABSTRACT:
+                if (janet_compare_abstract(janet_unwrap_abstract(x), janet_unwrap_abstract(y))) return 0;
+                break;
+            default:
+                if (janet_unwrap_pointer(x) != janet_unwrap_pointer(y)) return 0;
+                break;
+            case JANET_TUPLE: {
+                const Janet *t1 = janet_unwrap_tuple(x);
+                const Janet *t2 = janet_unwrap_tuple(y);
+                if (t1 == t2) break;
+                if (janet_tuple_hash(t1) != janet_tuple_hash(t2)) return 0;
+                if (janet_tuple_length(t1) != janet_tuple_length(t2)) return 0;
+                push_traversal_node(janet_tuple_head(t1), janet_tuple_head(t2), 0);
+                break;
+            }
+            break;
+            case JANET_STRUCT: {
+                const JanetKV *s1 = janet_unwrap_struct(x);
+                const JanetKV *s2 = janet_unwrap_struct(y);
+                if (s1 == s2) break;
+                if (janet_struct_hash(s1) != janet_struct_hash(s2)) return 0;
+                if (janet_struct_length(s1) != janet_struct_length(s2)) return 0;
+                push_traversal_node(janet_struct_head(s1), janet_struct_head(s2), 0);
+                break;
+            }
+            break;
+        }
+    } while (!traversal_next(&x, &y));
+    return 1;
 }
 
 /* Computes a hash value for a function */
@@ -83,6 +261,15 @@ int32_t janet_hash(Janet x) {
         case JANET_STRUCT:
             hash = janet_struct_hash(janet_unwrap_struct(x));
             break;
+        case JANET_ABSTRACT: {
+            JanetAbstract xx = janet_unwrap_abstract(x);
+            const JanetAbstractType *at = janet_abstract_type(xx);
+            if (at->hash != NULL) {
+                hash = at->hash(xx, janet_abstract_size(xx));
+                break;
+            }
+        }
+        /* fallthrough */
         default:
             /* TODO - test performance with different hash functions */
             if (sizeof(double) == sizeof(void *)) {
@@ -104,45 +291,73 @@ int32_t janet_hash(Janet x) {
 
 /* Compares x to y. If they are equal returns 0. If x is less, returns -1.
  * If y is less, returns 1. All types are comparable
- * and should have strict ordering. */
+ * and should have strict ordering, excepts NaNs. */
 int janet_compare(Janet x, Janet y) {
-    if (janet_type(x) == janet_type(y)) {
-        switch (janet_type(x)) {
+    janet_vm_traversal = janet_vm_traversal_base;
+    int status;
+    do {
+        JanetType tx = janet_type(x);
+        JanetType ty = janet_type(y);
+        if (tx != ty) return tx < ty ? -1 : 1;
+        switch (tx) {
             case JANET_NIL:
-                return 0;
-            case JANET_BOOLEAN:
-                return janet_unwrap_boolean(x) - janet_unwrap_boolean(y);
-            case JANET_NUMBER:
-                /* Check for NaNs to ensure total order */
-                if (janet_unwrap_number(x) != janet_unwrap_number(x))
-                    return janet_unwrap_number(y) != janet_unwrap_number(y)
-                           ? 0
-                           : -1;
-                if (janet_unwrap_number(y) != janet_unwrap_number(y))
-                    return 1;
-
-                if (janet_unwrap_number(x) == janet_unwrap_number(y)) {
-                    return 0;
+                break;
+            case JANET_BOOLEAN: {
+                int diff = janet_unwrap_boolean(x) - janet_unwrap_boolean(y);
+                if (diff) return diff;
+                break;
+            }
+            case JANET_NUMBER: {
+                double xx = janet_unwrap_number(x);
+                double yy = janet_unwrap_number(y);
+                if (xx == yy) {
+                    break;
                 } else {
-                    return janet_unwrap_number(x) > janet_unwrap_number(y) ? 1 : -1;
+                    return (xx < yy) ? -1 : 1;
                 }
+            }
             case JANET_STRING:
             case JANET_SYMBOL:
-            case JANET_KEYWORD:
-                return janet_string_compare(janet_unwrap_string(x), janet_unwrap_string(y));
-            case JANET_TUPLE:
-                return janet_tuple_compare(janet_unwrap_tuple(x), janet_unwrap_tuple(y));
-            case JANET_STRUCT:
-                return janet_struct_compare(janet_unwrap_struct(x), janet_unwrap_struct(y));
-            default:
-                if (janet_unwrap_string(x) == janet_unwrap_string(y)) {
-                    return 0;
+            case JANET_KEYWORD: {
+                int diff = janet_string_compare(janet_unwrap_string(x), janet_unwrap_string(y));
+                if (diff) return diff;
+                break;
+            }
+            case JANET_ABSTRACT: {
+                int diff = janet_compare_abstract(janet_unwrap_abstract(x), janet_unwrap_abstract(y));
+                if (diff) return diff;
+                break;
+            }
+            default: {
+                if (janet_unwrap_pointer(x) == janet_unwrap_pointer(y)) {
+                    break;
                 } else {
-                    return janet_unwrap_string(x) > janet_unwrap_string(y) ? 1 : -1;
+                    return janet_unwrap_pointer(x) > janet_unwrap_pointer(y) ? 1 : -1;
                 }
+            }
+            case JANET_TUPLE: {
+                const Janet *lhs = janet_unwrap_tuple(x);
+                const Janet *rhs = janet_unwrap_tuple(y);
+                push_traversal_node(janet_tuple_head(lhs), janet_tuple_head(rhs), 1);
+                break;
+            }
+            case JANET_STRUCT: {
+                const JanetKV *lhs = janet_unwrap_struct(x);
+                const JanetKV *rhs = janet_unwrap_struct(y);
+                int32_t llen = janet_struct_capacity(lhs);
+                int32_t rlen = janet_struct_capacity(rhs);
+                int32_t lhash = janet_struct_hash(lhs);
+                int32_t rhash = janet_struct_hash(rhs);
+                if (llen < rlen) return -1;
+                if (llen > rlen) return 1;
+                if (lhash < rhash) return -1;
+                if (lhash > rhash) return 1;
+                push_traversal_node(janet_struct_head(lhs), janet_struct_head(rhs), 0);
+                break;
+            }
         }
-    }
-    return (janet_type(x) < janet_type(y)) ? -1 : 1;
+    } while (!(status = traversal_next(&x, &y)));
+    return status - 2;
 }
 
 static int32_t getter_checkint(Janet key, int32_t max) {
@@ -197,7 +412,8 @@ Janet janet_in(Janet ds, Janet key) {
         case JANET_ABSTRACT: {
             JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
             if (type->get) {
-                value = (type->get)(janet_unwrap_abstract(ds), key);
+                if (!(type->get)(janet_unwrap_abstract(ds), key, &value))
+                    janet_panicf("key %v not found in %v ", key, ds);
             } else {
                 janet_panicf("no getter for %v ", ds);
             }
@@ -223,10 +439,13 @@ Janet janet_get(Janet ds, Janet key) {
             return janet_wrap_integer(str[index]);
         }
         case JANET_ABSTRACT: {
+            Janet value;
             void *abst = janet_unwrap_abstract(ds);
             JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(abst);
             if (!type->get) return janet_wrap_nil();
-            return (type->get)(abst, key);
+            if ((type->get)(abst, key, &value))
+                return value;
+            return janet_wrap_nil();
         }
         case JANET_ARRAY:
         case JANET_TUPLE:
@@ -304,7 +523,8 @@ Janet janet_getindex(Janet ds, int32_t index) {
         case JANET_ABSTRACT: {
             JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
             if (type->get) {
-                value = (type->get)(janet_unwrap_abstract(ds), janet_wrap_integer(index));
+                if (!(type->get)(janet_unwrap_abstract(ds), janet_wrap_integer(index), &value))
+                    value = janet_wrap_nil();
             } else {
                 janet_panicf("no getter for %v ", ds);
             }

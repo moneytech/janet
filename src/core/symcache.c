@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -25,15 +25,16 @@
  * checks, all symbols are interned so that there is a single copy of it in the
  * whole program. Equality is then just a pointer check. */
 
-#include <string.h>
-
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "state.h"
 #include "gc.h"
 #include "util.h"
 #include "symcache.h"
 #endif
+
+#include <string.h>
 
 /* Cache state */
 JANET_THREAD_LOCAL const uint8_t **janet_vm_cache = NULL;
@@ -44,7 +45,7 @@ JANET_THREAD_LOCAL uint32_t janet_vm_cache_deleted = 0;
 /* Initialize the cache (allocate cache memory) */
 void janet_symcache_init() {
     janet_vm_cache_capacity = 1024;
-    janet_vm_cache = calloc(1, janet_vm_cache_capacity * sizeof(const uint8_t *));
+    janet_vm_cache = calloc(1, (size_t) janet_vm_cache_capacity * sizeof(const uint8_t *));
     if (NULL == janet_vm_cache) {
         JANET_OUT_OF_MEMORY;
     }
@@ -121,7 +122,7 @@ notfound:
 static void janet_cache_resize(uint32_t newCapacity) {
     uint32_t i, oldCapacity;
     const uint8_t **oldCache = janet_vm_cache;
-    const uint8_t **newCache = calloc(1, newCapacity * sizeof(const uint8_t *));
+    const uint8_t **newCache = calloc(1, (size_t) newCapacity * sizeof(const uint8_t *));
     if (newCache == NULL) {
         JANET_OUT_OF_MEMORY;
     }
@@ -178,11 +179,11 @@ const uint8_t *janet_symbol(const uint8_t *str, int32_t len) {
     const uint8_t **bucket = janet_symcache_findmem(str, len, hash, &success);
     if (success)
         return *bucket;
-    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_SYMBOL, sizeof(JanetStringHead) + len + 1);
+    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_SYMBOL, sizeof(JanetStringHead) + (size_t) len + 1);
     head->hash = hash;
     head->length = len;
     newstr = (uint8_t *)(head->data);
-    memcpy(newstr, str, len);
+    safe_memcpy(newstr, str, len);
     newstr[len] = 0;
     janet_symcache_put((const uint8_t *)newstr, bucket);
     return newstr;

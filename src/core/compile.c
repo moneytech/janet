@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "compile.h"
 #include "emit.h"
@@ -101,6 +102,7 @@ void janetc_scope(JanetScope *s, JanetCompiler *c, int flags, const char *name) 
     scope.bytecode_start = janet_v_count(c->buffer);
     scope.flags = flags;
     scope.parent = c->scope;
+    janetc_regalloc_init(&scope.ua);
     /* Inherit slots */
     if ((!(flags & JANET_SCOPE_FUNCTION)) && c->scope) {
         janetc_regalloc_clone(&scope.ra, &(c->scope->ra));
@@ -148,6 +150,7 @@ void janetc_popscope(JanetCompiler *c) {
     janet_v_free(oldscope->envs);
     janet_v_free(oldscope->defs);
     janetc_regalloc_deinit(&oldscope->ra);
+    janetc_regalloc_deinit(&oldscope->ua);
     /* Update pointer */
     if (newscope)
         newscope->child = NULL;
@@ -201,7 +204,7 @@ JanetSlot janetc_resolve(
         switch (btype) {
             default:
             case JANET_BINDING_NONE:
-                janetc_error(c, janet_formatc("unknown symbol %q", sym));
+                janetc_error(c, janet_formatc("unknown symbol %q", janet_wrap_symbol(sym)));
                 return janetc_cslot(janet_wrap_nil());
             case JANET_BINDING_DEF:
             case JANET_BINDING_MACRO: /* Macro should function like defs when not in calling pos */
@@ -235,6 +238,11 @@ found:
         scope = scope->parent;
     janet_assert(scope, "invalid scopes");
     scope->flags |= JANET_SCOPE_ENV;
+
+    /* In the function scope, allocate the slot as an upvalue */
+    janetc_regalloc_touch(&scope->ua, ret.index);
+
+    /* Iterate through child scopes and make sure environment is propagated */
     scope = scope->child;
 
     /* Propagate env up to current scope */
@@ -454,6 +462,7 @@ static JanetSlot janetc_call(JanetFopts opts, JanetSlot *slots, JanetSlot fun) {
                 break;
                 case JANET_CFUNCTION:
                 case JANET_ABSTRACT:
+                case JANET_NIL:
                     break;
                 case JANET_KEYWORD:
                     if (min_arity == 0) {
@@ -582,18 +591,24 @@ static int macroexpand1(
             es = janet_formatc("macro arity mismatch, expected at most %d, got %d", maxar, arity);
         c->result.macrofiber = NULL;
         janetc_error(c, es);
+        return 0;
     }
     /* Set env */
     fiberp->env = c->env;
     int lock = janet_gclock();
-    JanetSignal status = janet_continue(fiberp, janet_wrap_nil(), &x);
+    Janet mf_kw = janet_ckeywordv("macro-form");
+    janet_table_put(c->env, mf_kw, x);
+    Janet tempOut;
+    JanetSignal status = janet_continue(fiberp, janet_wrap_nil(), &tempOut);
+    janet_table_put(c->env, mf_kw, janet_wrap_nil());
     janet_gcunlock(lock);
     if (status != JANET_SIGNAL_OK) {
-        const uint8_t *es = janet_formatc("(macro) %V", x);
+        const uint8_t *es = janet_formatc("(macro) %V", tempOut);
         c->result.macrofiber = fiberp;
         janetc_error(c, es);
+        return 0;
     } else {
-        *out = x;
+        *out = tempOut;
     }
 
     return 1;
@@ -683,7 +698,32 @@ JanetSlot janetc_value(JanetFopts opts, Janet x) {
     return ret;
 }
 
+/* Add function flags to janet functions */
+void janet_def_addflags(JanetFuncDef *def) {
+    int32_t set_flags = 0;
+    int32_t unset_flags = 0;
+    /* pos checks */
+    if (def->name)            set_flags |= JANET_FUNCDEF_FLAG_HASNAME;
+    if (def->source)          set_flags |= JANET_FUNCDEF_FLAG_HASSOURCE;
+    if (def->defs)            set_flags |= JANET_FUNCDEF_FLAG_HASDEFS;
+    if (def->environments)    set_flags |= JANET_FUNCDEF_FLAG_HASENVS;
+    if (def->sourcemap)       set_flags |= JANET_FUNCDEF_FLAG_HASSOURCEMAP;
+    if (def->closure_bitset)  set_flags |= JANET_FUNCDEF_FLAG_HASCLOBITSET;
+    /* negative checks */
+    if (!def->name)           unset_flags |= JANET_FUNCDEF_FLAG_HASNAME;
+    if (!def->source)         unset_flags |= JANET_FUNCDEF_FLAG_HASSOURCE;
+    if (!def->defs)           unset_flags |= JANET_FUNCDEF_FLAG_HASDEFS;
+    if (!def->environments)   unset_flags |= JANET_FUNCDEF_FLAG_HASENVS;
+    if (!def->sourcemap)      unset_flags |= JANET_FUNCDEF_FLAG_HASSOURCEMAP;
+    if (!def->closure_bitset) unset_flags |= JANET_FUNCDEF_FLAG_HASCLOBITSET;
+    /* Update flags */
+    def->flags |= set_flags;
+    def->flags &= ~unset_flags;
+}
+
 /* Compile a funcdef */
+/* Once the various other settings of the FuncDef have been tweaked,
+ * call janet_def_addflags to set the proper flags for the funcdef */
 JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
     JanetScope *scope = c->scope;
     JanetFuncDef *def = janet_funcdef_alloc();
@@ -704,20 +744,20 @@ JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
     /* Copy bytecode (only last chunk) */
     def->bytecode_length = janet_v_count(c->buffer) - scope->bytecode_start;
     if (def->bytecode_length) {
-        size_t s = sizeof(int32_t) * def->bytecode_length;
+        size_t s = sizeof(int32_t) * (size_t) def->bytecode_length;
         def->bytecode = malloc(s);
         if (NULL == def->bytecode) {
             JANET_OUT_OF_MEMORY;
         }
-        memcpy(def->bytecode, c->buffer + scope->bytecode_start, s);
+        safe_memcpy(def->bytecode, c->buffer + scope->bytecode_start, s);
         janet_v__cnt(c->buffer) = scope->bytecode_start;
         if (NULL != c->mapbuffer && c->source) {
-            size_t s = sizeof(JanetSourceMapping) * def->bytecode_length;
+            size_t s = sizeof(JanetSourceMapping) * (size_t) def->bytecode_length;
             def->sourcemap = malloc(s);
             if (NULL == def->sourcemap) {
                 JANET_OUT_OF_MEMORY;
             }
-            memcpy(def->sourcemap, c->mapbuffer + scope->bytecode_start, s);
+            safe_memcpy(def->sourcemap, c->mapbuffer + scope->bytecode_start, s);
             janet_v__cnt(c->mapbuffer) = scope->bytecode_start;
         }
     }
@@ -730,6 +770,22 @@ JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
     def->flags = 0;
     if (scope->flags & JANET_SCOPE_ENV) {
         def->flags |= JANET_FUNCDEF_FLAG_NEEDSENV;
+    }
+
+    /* Copy upvalue bitset */
+    if (scope->ua.count) {
+        /* Number of u32s we need to create a bitmask for all slots */
+        int32_t slotchunks = (def->slotcount + 31) >> 5;
+        /* numchunks is min of slotchunks and scope->ua.count */
+        int32_t numchunks = slotchunks > scope->ua.count ? scope->ua.count : slotchunks;
+        uint32_t *chunks = calloc(sizeof(uint32_t), slotchunks);
+        if (NULL == chunks) {
+            JANET_OUT_OF_MEMORY;
+        }
+        memcpy(chunks, scope->ua.chunks, sizeof(uint32_t) * numchunks);
+        /* Register allocator preallocates some registers [240-255, high 16 bits of chunk index 7], we can ignore those. */
+        if (scope->ua.count > 7) chunks[7] &= 0xFFFFU;
+        def->closure_bitset = chunks;
     }
 
     /* Pop the scope */
@@ -786,6 +842,7 @@ JanetCompileResult janet_compile(Janet source, JanetTable *env, const uint8_t *w
     if (c.result.status == JANET_COMPILE_OK) {
         JanetFuncDef *def = janetc_pop_funcdef(&c);
         def->name = janet_cstring("_thunk");
+        janet_def_addflags(def);
         c.result.funcdef = def;
     } else {
         c.result.error_mapping = c.current_mapping;
@@ -828,10 +885,10 @@ static const JanetReg compile_cfuns[] = {
     {
         "compile", cfun,
         JDOC("(compile ast &opt env source)\n\n"
-             "Compiles an Abstract Syntax Tree (ast) into a janet function. "
+             "Compiles an Abstract Syntax Tree (ast) into a function. "
              "Pair the compile function with parsing functionality to implement "
-             "eval. Returns a janet function and does not modify ast. Throws an "
-             "error if the ast cannot be compiled.")
+             "eval. Returns a new function and does not modify ast. Returns an error "
+             "struct with keys :line, :column, and :error if compilation fails.")
     },
     {NULL, NULL, NULL}
 };

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -24,6 +24,7 @@
 #define JANET_COMPILE_H
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "regalloc.h"
 #endif
@@ -48,20 +49,18 @@
 #define JANET_FUN_RSHIFT 17
 #define JANET_FUN_RSHIFTU 18
 #define JANET_FUN_BNOT 19
-#define JANET_FUN_ORDER_GT 20
-#define JANET_FUN_ORDER_LT 21
-#define JANET_FUN_ORDER_GTE 22
-#define JANET_FUN_ORDER_LTE 23
-#define JANET_FUN_ORDER_EQ 24
-#define JANET_FUN_ORDER_NEQ 25
-#define JANET_FUN_GT 26
-#define JANET_FUN_LT 27
-#define JANET_FUN_GTE 28
-#define JANET_FUN_LTE 29
-#define JANET_FUN_EQ 30
-#define JANET_FUN_NEQ 31
-#define JANET_FUN_PROP 32
-#define JANET_FUN_GET 33
+#define JANET_FUN_GT 20
+#define JANET_FUN_LT 21
+#define JANET_FUN_GTE 22
+#define JANET_FUN_LTE 23
+#define JANET_FUN_EQ 24
+#define JANET_FUN_NEQ 25
+#define JANET_FUN_PROP 26
+#define JANET_FUN_GET 27
+#define JANET_FUN_NEXT 28
+#define JANET_FUN_MODULO 29
+#define JANET_FUN_REMAINDER 30
+#define JANET_FUN_CMP 31
 
 /* Compiler typedefs */
 typedef struct JanetCompiler JanetCompiler;
@@ -129,7 +128,10 @@ struct JanetScope {
     /* Regsiter allocator */
     JanetcRegisterAllocator ra;
 
-    /* Referenced closure environents. The values at each index correspond
+    /* Upvalue allocator */
+    JanetcRegisterAllocator ua;
+
+    /* Referenced closure environments. The values at each index correspond
      * to which index to get the environment from in the parent. The environment
      * that corresponds to the direct parent's stack will always have value 0. */
     int32_t *envs;

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -32,12 +32,21 @@
  * be in it. However, thread local global variables for interpreter
  * state should allow easy multi-threading. */
 
+typedef struct JanetScratch JanetScratch;
+
+/* Top level dynamic bindings */
+extern JANET_THREAD_LOCAL JanetTable *janet_vm_top_dyns;
+
+/* Cache the core environment */
+extern JANET_THREAD_LOCAL JanetTable *janet_vm_core_env;
+
 /* How many VM stacks have been entered */
 extern JANET_THREAD_LOCAL int janet_vm_stackn;
 
 /* The current running fiber on the current thread.
  * Set and unset by janet_run. */
 extern JANET_THREAD_LOCAL JanetFiber *janet_vm_fiber;
+extern JANET_THREAD_LOCAL JanetFiber *janet_vm_root_fiber;
 
 /* The current pointer to the inner most jmp_buf. The current
  * return point for panics. */
@@ -48,6 +57,10 @@ extern JANET_THREAD_LOCAL Janet *janet_vm_return_reg;
  * along with otherwise bare c function pointers. */
 extern JANET_THREAD_LOCAL JanetTable *janet_vm_registry;
 
+/* Registry for abstract abstract types that can be marshalled.
+ * We need this to look up the constructors when unmarshalling. */
+extern JANET_THREAD_LOCAL JanetTable *janet_vm_abstract_registry;
+
 /* Immutable value cache */
 extern JANET_THREAD_LOCAL const uint8_t **janet_vm_cache;
 extern JANET_THREAD_LOCAL uint32_t janet_vm_cache_capacity;
@@ -56,18 +69,36 @@ extern JANET_THREAD_LOCAL uint32_t janet_vm_cache_deleted;
 
 /* Garbage collection */
 extern JANET_THREAD_LOCAL void *janet_vm_blocks;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_gc_interval;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_next_collection;
+extern JANET_THREAD_LOCAL size_t janet_vm_gc_interval;
+extern JANET_THREAD_LOCAL size_t janet_vm_next_collection;
+extern JANET_THREAD_LOCAL size_t janet_vm_block_count;
 extern JANET_THREAD_LOCAL int janet_vm_gc_suspend;
 
 /* GC roots */
 extern JANET_THREAD_LOCAL Janet *janet_vm_roots;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_root_count;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_root_capacity;
+extern JANET_THREAD_LOCAL size_t janet_vm_root_count;
+extern JANET_THREAD_LOCAL size_t janet_vm_root_capacity;
 
 /* Scratch memory */
-extern JANET_THREAD_LOCAL void **janet_scratch_mem;
+extern JANET_THREAD_LOCAL JanetScratch **janet_scratch_mem;
 extern JANET_THREAD_LOCAL size_t janet_scratch_cap;
 extern JANET_THREAD_LOCAL size_t janet_scratch_len;
+
+/* Recursionless traversal of data structures */
+typedef struct {
+    JanetGCObject *self;
+    JanetGCObject *other;
+    int32_t index;
+    int32_t index2;
+} JanetTraversalNode;
+extern JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal;
+extern JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal_top;
+extern JANET_THREAD_LOCAL JanetTraversalNode *janet_vm_traversal_base;
+
+/* Setup / teardown */
+#ifdef JANET_THREADS
+void janet_threads_init(void);
+void janet_threads_deinit(void);
+#endif
 
 #endif /* JANET_STATE_H_defined */

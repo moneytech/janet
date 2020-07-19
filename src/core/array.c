@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -35,7 +36,7 @@ JanetArray *janet_array(int32_t capacity) {
     Janet *data = NULL;
     if (capacity > 0) {
         janet_vm_next_collection += capacity * sizeof(Janet);
-        data = (Janet *) malloc(sizeof(Janet) * capacity);
+        data = (Janet *) malloc(sizeof(Janet) * (size_t) capacity);
         if (NULL == data) {
             JANET_OUT_OF_MEMORY;
         }
@@ -51,11 +52,11 @@ JanetArray *janet_array_n(const Janet *elements, int32_t n) {
     JanetArray *array = janet_gcalloc(JANET_MEMORY_ARRAY, sizeof(JanetArray));
     array->capacity = n;
     array->count = n;
-    array->data = malloc(sizeof(Janet) * n);
+    array->data = malloc(sizeof(Janet) * (size_t) n);
     if (!array->data) {
         JANET_OUT_OF_MEMORY;
     }
-    memcpy(array->data, elements, sizeof(Janet) * n);
+    safe_memcpy(array->data, elements, sizeof(Janet) * n);
     return array;
 }
 
@@ -92,6 +93,9 @@ void janet_array_setcount(JanetArray *array, int32_t count) {
 
 /* Push a value to the top of the array */
 void janet_array_push(JanetArray *array, Janet x) {
+    if (array->count == INT32_MAX) {
+        janet_panic("array overflow");
+    }
     int32_t newcount = array->count + 1;
     janet_array_ensure(array, newcount, 2);
     array->data[array->count] = x;
@@ -125,6 +129,28 @@ static Janet cfun_array_new(int32_t argc, Janet *argv) {
     return janet_wrap_array(array);
 }
 
+static Janet cfun_array_new_filled(int32_t argc, Janet *argv) {
+    janet_arity(argc, 1, 2);
+    int32_t count = janet_getinteger(argv, 0);
+    Janet x = (argc == 2) ? argv[1] : janet_wrap_nil();
+    JanetArray *array = janet_array(count);
+    for (int32_t i = 0; i < count; i++) {
+        array->data[i] = x;
+    }
+    array->count = count;
+    return janet_wrap_array(array);
+}
+
+static Janet cfun_array_fill(int32_t argc, Janet *argv) {
+    janet_arity(argc, 1, 2);
+    JanetArray *array = janet_getarray(argv, 0);
+    Janet x = (argc == 2) ? argv[1] : janet_wrap_nil();
+    for (int32_t i = 0; i < array->count; i++) {
+        array->data[i] = x;
+    }
+    return argv[0];
+}
+
 static Janet cfun_array_pop(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
     JanetArray *array = janet_getarray(argv, 0);
@@ -140,9 +166,12 @@ static Janet cfun_array_peek(int32_t argc, Janet *argv) {
 static Janet cfun_array_push(int32_t argc, Janet *argv) {
     janet_arity(argc, 1, -1);
     JanetArray *array = janet_getarray(argv, 0);
+    if (INT32_MAX - argc + 1 <= array->count) {
+        janet_panic("array overflow");
+    }
     int32_t newcount = array->count - 1 + argc;
     janet_array_ensure(array, newcount, 2);
-    if (argc > 1) memcpy(array->data + array->count, argv + 1, (argc - 1) * sizeof(Janet));
+    if (argc > 1) memcpy(array->data + array->count, argv + 1, (size_t)(argc - 1) * sizeof(Janet));
     array->count = newcount;
     return argv[0];
 }
@@ -202,11 +231,16 @@ static Janet cfun_array_insert(int32_t argc, Janet *argv) {
         janet_panicf("insertion index %d out of range [0,%d]", at, array->count);
     chunksize = (argc - 2) * sizeof(Janet);
     restsize = (array->count - at) * sizeof(Janet);
+    if (INT32_MAX - (argc - 2) < array->count) {
+        janet_panic("array overflow");
+    }
     janet_array_ensure(array, array->count + argc - 2, 2);
-    memmove(array->data + at + argc - 2,
-            array->data + at,
-            restsize);
-    memcpy(array->data + at, argv + 2, chunksize);
+    if (restsize) {
+        memmove(array->data + at + argc - 2,
+                array->data + at,
+                restsize);
+    }
+    safe_memcpy(array->data + at, argv + 2, chunksize);
     array->count += (argc - 2);
     return argv[0];
 }
@@ -236,12 +270,43 @@ static Janet cfun_array_remove(int32_t argc, Janet *argv) {
     return argv[0];
 }
 
+static Janet cfun_array_trim(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetArray *array = janet_getarray(argv, 0);
+    if (array->count) {
+        if (array->count < array->capacity) {
+            Janet *newData = realloc(array->data, array->count * sizeof(Janet));
+            if (NULL == newData) {
+                JANET_OUT_OF_MEMORY;
+            }
+            array->data = newData;
+            array->capacity = array->count;
+        }
+    } else {
+        array->capacity = 0;
+        free(array->data);
+        array->data = NULL;
+    }
+    return argv[0];
+}
+
 static const JanetReg array_cfuns[] = {
     {
         "array/new", cfun_array_new,
         JDOC("(array/new capacity)\n\n"
              "Creates a new empty array with a pre-allocated capacity. The same as "
              "(array) but can be more efficient if the maximum size of an array is known.")
+    },
+    {
+        "array/new-filled", cfun_array_new_filled,
+        JDOC("(array/new-filled count &opt value)\n\n"
+             "Creates a new array of count elements, all set to value, which defaults to nil. Returns the new array.")
+    },
+    {
+        "array/fill", cfun_array_fill,
+        JDOC("(array/fill arr &opt value)\n\n"
+             "Replace all elements of an array with value (defaulting to nil) without changing the length of the array. "
+             "Returns the modified array.")
     },
     {
         "array/pop", cfun_array_pop,
@@ -299,6 +364,11 @@ static const JanetReg array_cfuns[] = {
              "the end of the array with a negative index, and n must be a non-negative integer. "
              "By default, n is 1. "
              "Returns the array.")
+    },
+    {
+        "array/trim", cfun_array_trim,
+        JDOC("(array/trim arr)\n\n"
+             "Set the backing capacity of an array to its current length. Returns the modified array.")
     },
     {NULL, NULL, NULL}
 };

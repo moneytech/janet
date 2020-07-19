@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -33,7 +34,7 @@ JanetKV *janet_struct_begin(int32_t count) {
     int32_t capacity = janet_tablen(2 * count);
     if (capacity < 0) capacity = janet_tablen(count + 1);
 
-    size_t size = sizeof(JanetStructHead) + capacity * sizeof(JanetKV);
+    size_t size = sizeof(JanetStructHead) + (size_t) capacity * sizeof(JanetKV);
     JanetStructHead *head = janet_gcalloc(JANET_MEMORY_STRUCT, size);
     head->length = count;
     head->capacity = capacity;
@@ -122,7 +123,8 @@ void janet_struct_put(JanetKV *st, Janet key, Janet value) {
                 dist = otherdist;
                 hash = otherhash;
             } else if (status == 0) {
-                /* A key was added to the struct more than once */
+                /* A key was added to the struct more than once - replace old value */
+                kv->value = value;
                 return;
             }
         }
@@ -164,52 +166,4 @@ JanetTable *janet_struct_to_table(const JanetKV *st) {
         }
     }
     return table;
-}
-
-/* Check if two structs are equal */
-int janet_struct_equal(const JanetKV *lhs, const JanetKV *rhs) {
-    int32_t index;
-    int32_t llen = janet_struct_capacity(lhs);
-    int32_t rlen = janet_struct_capacity(rhs);
-    int32_t lhash = janet_struct_hash(lhs);
-    int32_t rhash = janet_struct_hash(rhs);
-    if (llen != rlen)
-        return 0;
-    if (lhash != rhash)
-        return 0;
-    for (index = 0; index < llen; index++) {
-        const JanetKV *l = lhs + index;
-        const JanetKV *r = rhs + index;
-        if (!janet_equals(l->key, r->key))
-            return 0;
-        if (!janet_equals(l->value, r->value))
-            return 0;
-    }
-    return 1;
-}
-
-/* Compare structs */
-int janet_struct_compare(const JanetKV *lhs, const JanetKV *rhs) {
-    int32_t i;
-    int32_t lhash = janet_struct_hash(lhs);
-    int32_t rhash = janet_struct_hash(rhs);
-    int32_t llen = janet_struct_capacity(lhs);
-    int32_t rlen = janet_struct_capacity(rhs);
-    if (llen < rlen)
-        return -1;
-    if (llen > rlen)
-        return 1;
-    if (lhash < rhash)
-        return -1;
-    if (lhash > rhash)
-        return 1;
-    for (i = 0; i < llen; ++i) {
-        const JanetKV *l = lhs + i;
-        const JanetKV *r = rhs + i;
-        int comp = janet_compare(l->key, r->key);
-        if (comp != 0) return comp;
-        comp = janet_compare(l->value, r->value);
-        if (comp != 0) return comp;
-    }
-    return 0;
 }

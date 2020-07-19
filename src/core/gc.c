@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,33 +21,34 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "state.h"
 #include "symcache.h"
 #include "gc.h"
 #include "util.h"
+#include "fiber.h"
 #endif
+
+struct JanetScratch {
+    JanetScratchFinalizer finalize;
+    long long mem[]; /* for proper alignment */
+};
 
 /* GC State */
 JANET_THREAD_LOCAL void *janet_vm_blocks;
-JANET_THREAD_LOCAL uint32_t janet_vm_gc_interval;
-JANET_THREAD_LOCAL uint32_t janet_vm_next_collection;
+JANET_THREAD_LOCAL size_t janet_vm_gc_interval;
+JANET_THREAD_LOCAL size_t janet_vm_next_collection;
+JANET_THREAD_LOCAL size_t janet_vm_block_count;
 JANET_THREAD_LOCAL int janet_vm_gc_suspend = 0;
 
 /* Roots */
 JANET_THREAD_LOCAL Janet *janet_vm_roots;
-JANET_THREAD_LOCAL uint32_t janet_vm_root_count;
-JANET_THREAD_LOCAL uint32_t janet_vm_root_capacity;
+JANET_THREAD_LOCAL size_t janet_vm_root_count;
+JANET_THREAD_LOCAL size_t janet_vm_root_capacity;
 
 /* Scratch Memory */
-#ifdef JANET_64
-#define SCRATCH_HDR_SIZE 16 /* smalloc must guarantee 16 byte alignment. */
-#elif JANET_32
-#define SCRATCH_HDR_SIZE 8  /* smalloc must guarantee 8 byte alignment. */
-#else
-#error "unknown scratch alignment"
-#endif
-JANET_THREAD_LOCAL void **janet_scratch_mem;
+JANET_THREAD_LOCAL JanetScratch **janet_scratch_mem;
 JANET_THREAD_LOCAL size_t janet_scratch_cap;
 JANET_THREAD_LOCAL size_t janet_scratch_len;
 
@@ -64,9 +65,14 @@ static void janet_mark_string(const uint8_t *str);
 static void janet_mark_fiber(JanetFiber *fiber);
 static void janet_mark_abstract(void *adata);
 
-/* Local state that is only temporary */
+/* Local state that is only temporary for gc */
 static JANET_THREAD_LOCAL uint32_t depth = JANET_RECURSION_GUARD;
-static JANET_THREAD_LOCAL uint32_t orig_rootcount;
+static JANET_THREAD_LOCAL size_t orig_rootcount;
+
+/* Hint to the GC that we may need to collect */
+void janet_gcpressure(size_t s) {
+    janet_vm_next_collection += s;
+}
 
 /* Mark a value */
 void janet_mark(Janet x) {
@@ -185,7 +191,10 @@ static void janet_mark_funcenv(JanetFuncEnv *env) {
     if (janet_gc_reachable(env))
         return;
     janet_gc_mark(env);
-    if (env->offset) {
+    /* If closure env references a dead fiber, we can just copy out the stack frame we need so
+     * we don't need to keep around the whole dead fiber. */
+    janet_env_maybe_detach(env);
+    if (env->offset > 0) {
         /* On stack */
         janet_mark_fiber(env->as.fiber);
     } else {
@@ -301,6 +310,7 @@ static void janet_deinit_block(JanetGCObject *mem) {
             free(def->constants);
             free(def->bytecode);
             free(def->sourcemap);
+            free(def->closure_bitset);
         }
         break;
     }
@@ -318,6 +328,7 @@ void janet_sweep() {
             previous = current;
             current->flags &= ~JANET_MEM_REACHABLE;
         } else {
+            janet_vm_block_count--;
             janet_deinit_block(current);
             if (NULL != previous) {
                 previous->next = next;
@@ -347,18 +358,19 @@ void *janet_gcalloc(enum JanetMemoryType type, size_t size) {
     mem->flags = type;
 
     /* Prepend block to heap list */
-    janet_vm_next_collection += (int32_t) size;
+    janet_vm_next_collection += size;
     mem->next = janet_vm_blocks;
     janet_vm_blocks = mem;
+    janet_vm_block_count++;
 
     return (void *)mem;
 }
 
-static void free_one_scratch(void *mem) {
-    ScratchFinalizer finalize = *(ScratchFinalizer *)mem;
-    if (finalize)
-        finalize((char *)mem + SCRATCH_HDR_SIZE);
-    free(mem);
+static void free_one_scratch(JanetScratch *s) {
+    if (NULL != s->finalize) {
+        s->finalize((char *) s->mem);
+    }
+    free(s);
 }
 
 /* Free all allocated scratch memory */
@@ -369,12 +381,28 @@ static void janet_free_all_scratch(void) {
     janet_scratch_len = 0;
 }
 
+static JanetScratch *janet_mem2scratch(void *mem) {
+    JanetScratch *s = (JanetScratch *)mem;
+    return s - 1;
+}
+
 /* Run garbage collection */
 void janet_collect(void) {
     uint32_t i;
     if (janet_vm_gc_suspend) return;
     depth = JANET_RECURSION_GUARD;
+    /* Try and prevent many major collections back to back.
+     * A full collection will take O(janet_vm_block_count) time.
+     * If we have a large heap, make sure our interval is not too
+     * small so we won't make many collections over it. This is just a
+     * heuristic for automatically changing the gc interval */
+    if (janet_vm_block_count * 8 > janet_vm_gc_interval) {
+        janet_vm_gc_interval = janet_vm_block_count * sizeof(JanetGCObject);
+    }
     orig_rootcount = janet_vm_root_count;
+#ifdef JANET_NET
+    janet_net_markloop();
+#endif
     for (i = 0; i < orig_rootcount; i++)
         janet_mark(janet_vm_roots[i]);
     while (orig_rootcount < janet_vm_root_count) {
@@ -390,9 +418,9 @@ void janet_collect(void) {
  * and all of its children. If gcroot is called on a value n times, unroot
  * must also be called n times to remove it as a gc root. */
 void janet_gcroot(Janet root) {
-    uint32_t newcount = janet_vm_root_count + 1;
+    size_t newcount = janet_vm_root_count + 1;
     if (newcount > janet_vm_root_capacity) {
-        uint32_t newcap = 2 * newcount;
+        size_t newcap = 2 * newcount;
         janet_vm_roots = realloc(janet_vm_roots, sizeof(Janet) * newcap);
         if (NULL == janet_vm_roots) {
             JANET_OUT_OF_MEMORY;
@@ -472,60 +500,70 @@ void janet_gcunlock(int handle) {
 /* Scratch memory API */
 
 void *janet_smalloc(size_t size) {
-    void *mem = malloc(SCRATCH_HDR_SIZE + size);
-    if (NULL == mem) {
+    JanetScratch *s = malloc(sizeof(JanetScratch) + size);
+    if (NULL == s) {
         JANET_OUT_OF_MEMORY;
     }
-    *(ScratchFinalizer *)mem = NULL;
+    s->finalize = NULL;
     if (janet_scratch_len == janet_scratch_cap) {
         size_t newcap = 2 * janet_scratch_cap + 2;
-        void **newmem = (void **) realloc(janet_scratch_mem, newcap * sizeof(void *));
+        JanetScratch **newmem = (JanetScratch **) realloc(janet_scratch_mem, newcap * sizeof(JanetScratch));
         if (NULL == newmem) {
             JANET_OUT_OF_MEMORY;
         }
         janet_scratch_cap = newcap;
         janet_scratch_mem = newmem;
     }
-    janet_scratch_mem[janet_scratch_len++] = mem;
-    return (char *)mem + SCRATCH_HDR_SIZE;
+    janet_scratch_mem[janet_scratch_len++] = s;
+    return (char *)(s->mem);
+}
+
+void *janet_scalloc(size_t nmemb, size_t size) {
+    if (nmemb && size > SIZE_MAX / nmemb) {
+        JANET_OUT_OF_MEMORY;
+    }
+    size_t n = nmemb * size;
+    void *p = janet_smalloc(n);
+    memset(p, 0, n);
+    return p;
 }
 
 void *janet_srealloc(void *mem, size_t size) {
     if (NULL == mem) return janet_smalloc(size);
-    mem = (char *)mem - SCRATCH_HDR_SIZE;
+    JanetScratch *s = janet_mem2scratch(mem);
     if (janet_scratch_len) {
         for (size_t i = janet_scratch_len - 1; ; i--) {
-            if (janet_scratch_mem[i] == mem) {
-                void *newmem = realloc(mem, size + SCRATCH_HDR_SIZE);
-                if (NULL == newmem) {
+            if (janet_scratch_mem[i] == s) {
+                JanetScratch *news = realloc(s, size + sizeof(JanetScratch));
+                if (NULL == news) {
                     JANET_OUT_OF_MEMORY;
                 }
-                janet_scratch_mem[i] = newmem;
-                return (char *)newmem + SCRATCH_HDR_SIZE;
+                janet_scratch_mem[i] = news;
+                return (char *)(news->mem);
             }
             if (i == 0) break;
         }
     }
-    janet_exit("invalid janet_srealloc");
+    JANET_EXIT("invalid janet_srealloc");
 }
 
-void janet_sfinalizer(void *mem, ScratchFinalizer finalizer) {
-    mem = (char *)mem - SCRATCH_HDR_SIZE;
-    *(ScratchFinalizer *)mem = finalizer;
+void janet_sfinalizer(void *mem, JanetScratchFinalizer finalizer) {
+    JanetScratch *s = janet_mem2scratch(mem);
+    s->finalize = finalizer;
 }
 
 void janet_sfree(void *mem) {
     if (NULL == mem) return;
-    mem = (char *)mem - SCRATCH_HDR_SIZE;
+    JanetScratch *s = janet_mem2scratch(mem);
     if (janet_scratch_len) {
         for (size_t i = janet_scratch_len - 1; ; i--) {
-            if (janet_scratch_mem[i] == mem) {
+            if (janet_scratch_mem[i] == s) {
                 janet_scratch_mem[i] = janet_scratch_mem[--janet_scratch_len];
-                free_one_scratch(mem);
+                free_one_scratch(s);
                 return;
             }
             if (i == 0) break;
         }
     }
-    janet_exit("invalid janet_sfree");
+    JANET_EXIT("invalid janet_sfree");
 }

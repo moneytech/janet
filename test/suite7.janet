@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Calvin Rose & contributors
+# Copyright (c) 2020 Calvin Rose & contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -23,7 +23,6 @@
 
 # Using a large test grammar
 
-(def- core-env (table/getproto (fiber/getenv (fiber/current))))
 (def- specials {'fn true
                'var true
                'do true
@@ -41,7 +40,7 @@
 (defn capture-sym
   [text]
   (def sym (symbol text))
-  [(if (or (core-env sym) (specials sym)) :coresym :symbol) text])
+  [(if (or (root-env sym) (specials sym)) :coresym :symbol) text])
 
 (def grammar
   ~{:ws (set " \v\t\r\f\n\0")
@@ -226,6 +225,23 @@
                 :week-day 3}
                (os/date 1388608200)) "os/date")
 
+# OS mktime test
+
+(assert (= 1388608200 (os/mktime {:year-day 0
+                                  :minutes 30
+                                  :month 0
+                                  :dst false
+                                  :seconds 0
+                                  :year 2014
+                                  :month-day 0
+                                  :hours 20
+                                  :week-day 3})) "os/mktime")
+
+(def now (os/time))
+(assert (= (os/mktime (os/date now)) now) "UTC os/mktime")
+(assert (= (os/mktime (os/date now true) true) now) "local os/mktime")
+(assert (= (os/mktime {:year 1970}) 0) "os/mktime default values")
+
 # Appending buffer to self
 
 (with-dyns [:out @""]
@@ -276,5 +292,32 @@
   (comptime (math/random)))
 
 (assert (= (constantly) (constantly)) "comptime 1")
+
+(assert-error "arity issue in macro" (eval '(each [])))
+(assert-error "comptime issue" (eval '(comptime (error "oops"))))
+
+(with [f (file/temp)]
+  (file/write f "foo\n")
+  (file/flush f)
+  (file/seek f :set 0)
+  (assert (= (string (file/read f :all)) "foo\n") "temp files work"))
+
+(var counter 0)
+(when-with [x nil |$]
+           (++ counter))
+(when-with [x 10 |$]
+           (+= counter 10))
+
+(assert (= 10 counter) "when-with 1")
+
+(if-with [x nil |$] (++ counter) (+= counter 10))
+(if-with [x true |$] (+= counter 20) (+= counter 30))
+
+(assert (= 40 counter) "if-with 1")
+
+(def a @[])
+(eachk x [:a :b :c :d]
+  (array/push a x))
+(assert (deep= (range 4) a) "eachk 1")
 
 (end-suite)

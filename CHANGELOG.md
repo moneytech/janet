@@ -1,7 +1,162 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-### Unreleased
+## 1.11.0 - 2020-07-18
+- Add `forever` macro.
+- Add `any?` predicate to core.
+- Add `jpm list-pkgs` subcommand to see which package aliases are in the listing.
+- Add `jpm list-installed` subcommand to see which packages are installed.
+- Add `math/int-min`, `math/int-max`, `math/int32-min`, and `math/int32-max` for getting integer limits.
+- The gc interval is now autotuned, to prevent very bad gc behavior.
+- Improvements to the bytecode compiler, Janet will now generate more efficient bytecode.
+- Add `peg/find`, `peg/find-all`, `peg/replace`, and `peg/replace-all`
+- Add `math/nan`
+- Add `forv` macro
+- Add `symbol/slice`
+- Add `keyword/slice`
+- Allow cross compilation with Makefile.
+- Change `compare-primitve` to `cmp` and make it more efficient.
+- Add `reverse!` for reversing an array or buffer in place.
+- `janet_dobytes` and `janet_dostring` return parse errors in \*out
+- Add `repeat` macro for iterating something n times.
+- Add `eachy` (each yield) macro for iterating a fiber.
+- Fix `:generate` verb in loop macro to accept non symbols as bindings.
+- Add `:h`, `:h+`, and `:h*` in `default-peg-grammar` for hexidecimal digits.
+- Fix `%j` formatter to print numbers precisely (using the `%.17g` format string to printf).
+
+## 1.10.1 - 2020-06-18
+- Expose `janet_table_clear` in API.
+- Respect `JANET_NO_PROCESSES` define when building
+- Fix `jpm` rules having multiple copies of the same dependency.
+- Fix `jpm` install in some cases.
+- Add `array/trim` and `buffer/trim` to shrink the backing capacity of these types
+  to their current length.
+
+## 1.10.0 - 2020-06-14
+- Hardcode default jpm paths on install so env variables are needed in fewer cases.
+- Add `:no-compile` to `create-executable` option for jpm.
+- Fix bug with the `trace` function.
+- Add `:h`, `:a`, and `:c` flags to `thread/new` for creating new kinds of threads.
+  By default, threads will now consume much less memory per thread, but sending data between
+  threads may cost more.
+- Fix flychecking when using the `use` macro.
+- CTRL-C no longer exits the repl, and instead cancels the current form.
+- Various small bug fixes
+- New MSI installer instead of NSIS based installer.
+- Make `os/realpath` work on windows.
+- Add polymorphic `compare` functions for comparing numbers.
+- Add `to` and `thru` peg combinators.
+- Add `JANET_GIT` environment variable to jpm to use a specific git binary (useful mainly on windows).
+- `asm` and `disasm` functions now use keywords instead of macros for keys. Also
+  some slight changes to the way constants are encoded (remove wrapping `quote` in some cases).
+- Expose current macro form inside macros as (dyn :macro-form)
+- Add `tracev` macro.
+- Fix compiler bug that emitted incorrect code in some cases for while loops that create closures.
+- Add `:fresh` option to `(import ...)` to overwrite the module cache.
+- `(range x y 0)` will return an empty array instead of hanging forever.
+- Rename `jpm repl` to `jpm debug-repl`.
+
+## 1.9.1 - 2020-05-12
+- Add :prefix option to declare-source
+- Re-enable minimal builds with the debugger.
+- Add several flags for configuring Janet on different platforms.
+- Fix broken meson build from 1.9.0 and add meson to CI.
+- Fix compilation issue when nanboxing is disabled.
+
+## 1.9.0 - 2020-05-10
+- Add `:ldflags` option to many jpm declare functions.
+- Add `errorf` to core.
+- Add `lenprefix` combinator to PEGs.
+- Add `%M`, `%m`, `%N`, and `%n` formatters to formatting functions. These are the
+  same as `%Q`, `%q`, `%P`, and `%p`, but will not truncate long values.
+- Add `fiber/root`.
+- Add beta `net/` module to core for socket based networking.
+- Add the `parse` function to parse strings of source code more conveniently.
+- Add `jpm rule-tree` subcommand.
+- Add `--offline` flag to jpm to force use of the cache.
+- Allow sending pointers and C functions across threads via `thread/send`.
+- Fix bug in `getline`.
+- Add `sh-rule` and `sh-phony` to jpm's dialect of Janet.
+- Change C api's `janet_formatb` -> `janet_formatbv`, and add new function `janet_formatb` to C api.
+- Add `edefer` macro to core.
+- A struct/table literal/constructor with duplicate keys will use the last value given.
+  Previously, this was inconsistent between tables and structs, literals and constructor functions.
+- Add debugger to core. The debugger functions are only available
+  in a debug repl, and are prefixed by a `.`.
+- Add `sort-by` and `sorted-by` to core.
+- Support UTF-8 escapes in strings via `\uXXXX` or `\UXXXXXX`.
+- Add `math/erf`
+- Add `math/erfc`
+- Add `math/log1p`
+- Add `math/next`
+- Add os/umask
+- Add os/perm-int
+- Add os/perm-string
+- Add :int-permissions option for os/stat.
+- Add `jpm repl` subcommand, as well as `post-deps` macro in project.janet files.
+- Various bug fixes.
+
+## 1.8.1 - 2020-03-31
+- Fix bugs for big endian systems
+- Fix 1.8.0 regression on BSDs
+
+## 1.8.0 - 2020-03-29
+- Add `reduce2`, `accumulate`, and `accumulate2`.
+- Add lockfiles to `jpm` via `jpm make-lockfile` and `jpm load-lockfile`.
+- Add `os/realpath` (Not supported on windows).
+- Add `os/chmod`.
+- Add `chr` macro.
+- Allow `_` in the `match` macro to match anything without creating a binding
+  or doing unification. Also change behavior of matching nil.
+- Add `:range-to` and `:down-to` verbs in the `loop` macro.
+- Fix `and` and `or` macros returning nil instead of false in some cases.
+- Allow matching successfully against nil values in the `match` macro.
+- Improve `janet_formatc` and `janet_panicf` formatters to be more like `string/format`.
+  This makes it easier to make nice error messages from C.
+- Add `signal`
+- Add `fiber/can-resume?`
+- Allow fiber functions to accept arguments that are passed in via `resume`.
+- Make flychecking slightly less strict but more useful
+- Correct arity for `next`
+- Correct arity for `marshal`
+- Add `flush` and `eflush`
+- Add `prompt` and `return` on top of signal for user friendly delimited continuations.
+- Fix bug in buffer/blit when using the offset-src argument.
+- Fix segfault with malformed pegs.
+
+## 1.7.0 - 2020-02-01
+- Remove `file/fileno` and `file/fdopen`.
+- Remove `==`, `not==`, `order<`, `order>`, `order<=`, and `order>=`. Instead, use the normal
+  comparison and equality functions.
+- Let abstract types define a hash function and comparison/equality semantics. This lets
+  abstract types much better represent value types. This adds more fields to abstract types, which
+  will generate warnings when compiled against other versions.
+- Remove Emscripten build. Instead, use the amalgamated source code with a custom toolchain.
+- Update documentation.
+- Add `var-`
+- Add `module/add-paths`
+- Add `file/temp`
+- Add `mod` function to core.
+- Small bug fixes
+- Allow signaling from C functions (yielding) via janet\_signalv. This
+  makes it easy to write C functions that work with event loops, such as
+  in libuv or embedded in a game.
+- Add '%j' formatting option to the format family of functions.
+- Add `defer`
+- Add `assert`
+- Add `when-with`
+- Add `if-with`
+- Add completion to the default repl based on currently defined bindings. Also generally improve
+  the repl keybindings.
+- Add `eachk`
+- Add `eachp`
+- Improve functionality of the `next` function. `next` now works on many different
+  types, not just tables and structs. This allows for more generic data processing.
+- Fix thread module issue where sometimes decoding a message failed.
+- Fix segfault regression when macros are called with bad arity.
+
+## 1.6.0 - 2019-12-22
+- Add `thread/` module to the core.
 - Allow seeding RNGs with any sequence of bytes. This provides
   a wider key space for the RNG. Exposed in C as `janet_rng_longseed`.
 - Fix issue in `resume` and similar functions that could cause breakpoints to be skipped.
@@ -26,11 +181,18 @@ All notable changes to this project will be documented in this file.
 - Add `janet_in` to C API.
 - Add `truthy?`
 - Add `os/environ`
+- Add `buffer/fill` and `array/fill`
+- Add `array/new-filled`
 - Use `(doc)` with no arguments to see available bindings and dynamic bindings.
 - `jpm` will use `CC` and `AR` environment variables when compiling programs.
 - Add `comptime` macro for compile time evaluation.
 - Run `main` functions in scripts if they exist, just like jpm standalone binaries.
+- Add `protect` macro.
+- Add `root-env` to get the root environment table.
 - Change marshalling protocol with regard to abstract types.
+- Add `show-paths` to `jpm`.
+- Add several default patterns, like `:d` and `:s+`, to PEGs.
+- Update `jpm` path settings to make using `jpm` easier on non-global module trees.
 - Numerous small bug fixes and usability improvements.
 
 ### 1.5.1 - 2019-11-16

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "state.h"
@@ -274,7 +275,7 @@ static Janet doframe(JanetStackFrame *frame) {
         }
         /* Add stack arguments */
         slots = janet_array(def->slotcount);
-        memcpy(slots->data, stack, sizeof(Janet) * def->slotcount);
+        safe_memcpy(slots->data, stack, sizeof(Janet) * def->slotcount);
         slots->count = def->slotcount;
         janet_table_put(t, janet_ckeywordv("slots"), janet_wrap_array(slots));
     }

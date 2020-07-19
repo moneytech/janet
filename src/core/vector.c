@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include "vector.h"
 #include "util.h"
 #endif
@@ -40,18 +41,14 @@ void *janet_v_grow(void *v, int32_t increment, int32_t itemsize) {
 /* Convert a buffer to normal allocated memory (forget capacity) */
 void *janet_v_flattenmem(void *v, int32_t itemsize) {
     int32_t *p;
-    int32_t sizen;
     if (NULL == v) return NULL;
-    sizen = itemsize * janet_v__cnt(v);
-    p = malloc(sizen);
+    size_t size = (size_t) itemsize * janet_v__cnt(v);
+    p = malloc(size);
     if (NULL != p) {
-        memcpy(p, v, sizen);
+        safe_memcpy(p, v, size);
         return p;
     } else {
-        {
-            JANET_OUT_OF_MEMORY;
-        }
-        return NULL;
+        JANET_OUT_OF_MEMORY;
     }
 }
 

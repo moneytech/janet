@@ -2,26 +2,30 @@
 &nbsp;
 [![Appveyor Status](https://ci.appveyor.com/api/projects/status/bjraxrxexmt3sxyv/branch/master?svg=true)](https://ci.appveyor.com/project/bakpakin/janet/branch/master)
 [![Build Status](https://travis-ci.org/janet-lang/janet.svg?branch=master)](https://travis-ci.org/janet-lang/janet)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/.freebsd.yaml.svg)](https://builds.sr.ht/~bakpakin/janet/.freebsd.yaml?)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/.openbsd.yaml.svg)](https://builds.sr.ht/~bakpakin/janet/.openbsd.yaml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/freebsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/freebsd.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/openbsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/openbsd.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/meson.yml.svg)](https://builds.sr.ht/~bakpakin/janet/meson.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/meson_min.yml.svg)](https://builds.sr.ht/~bakpakin/janet/meson_min.yml?)
 
 <img src="https://raw.githubusercontent.com/janet-lang/janet/master/assets/janet-w200.png" alt="Janet logo" width=200 align="left">
 
 **Janet** is a functional and imperative programming language and bytecode interpreter. It is a
-modern lisp, but lists are replaced
-by other data structures with better utility and performance (arrays, tables, structs, tuples).
+lisp-like language, but lists are replaced
+by other data structures (arrays, tables (hash table), struct (immutable hash table), tuples).
 The language also supports bridging to native code written in C, meta-programming with macros, and bytecode assembly.
 
 There is a repl for trying out the language, as well as the ability
 to run script files. This client program is separate from the core runtime, so
-janet could be embedded into other programs. Try janet in your browser at
+Janet can be embedded into other programs. Try Janet in your browser at
 [https://janet-lang.org](https://janet-lang.org).
 
 <br>
 
 ## Use Cases
 
-Janet makes a good system scripting language, or a language to embed in other programs. Think Lua or Guile.
+Janet makes a good system scripting language, or a language to embed in other programs.
+It's like Lua and Guile in that regard. It has more built-in functionality and a richer core language than
+Lua, but smaller than GNU Guile or Python.
 
 ## Features
 
@@ -33,7 +37,7 @@ Janet makes a good system scripting language, or a language to embed in other pr
 * Mutable and immutable arrays (array/tuple)
 * Mutable and immutable hashtables (table/struct)
 * Mutable and immutable strings (buffer/string)
-* Lisp Macros
+* Macros
 * Byte code interpreter with an assembly interface, as well as bytecode verification
 * Tailcall Optimization
 * Direct interop with C via abstract types and C functions
@@ -43,7 +47,7 @@ Janet makes a good system scripting language, or a language to embed in other pr
 * Imperative programming as well as functional
 * REPL
 * Parsing Expression Grammars built in to the core library
-* 300+ functions and macros in the core library
+* 400+ functions and macros in the core library
 * Embedding Janet in other programs
 * Interactive environment with detailed stack traces
 
@@ -61,7 +65,9 @@ documentation for symbols in the core library. For example,
 Shows documentation for the doc macro.
 
 To get a list of all bindings in the default
-environment, use the `(all-bindings)` function.
+environment, use the `(all-bindings)` function. You
+can also use the `(doc)` macro with no arguments if you are in the repl
+to show bound symbols.
 
 ## Source
 
@@ -71,7 +77,7 @@ the SourceHut mirror is actively maintained.
 
 ## Building
 
-### macos and Unix-like
+### macOS and Unix-like
 
 The Makefile is non-portable and requires GNU-flavored make.
 
@@ -81,6 +87,8 @@ make
 make test
 make repl
 ```
+
+Find out more about the available make targets by running `make help`.
 
 ### 32-bit Haiku
 
@@ -114,14 +122,12 @@ gmake repl
 3. Run `build_win` to compile janet.
 4. Run `build_win test` to make sure everything is working.
 
-### Emscripten
+To build an `.msi` installer executable, in addition to the above steps, you will have to:
 
-To build janet for the web via [Emscripten](https://kripken.github.io/emscripten-site/), make sure you
-have `emcc` installed and on your path. On a linux or macOS system, use `make emscripten` to build
-`janet.js` and `janet.wasm` - both are needed to run janet in a browser or in node.
-The JavaScript build is what runs the repl on the main website,
-but really serves mainly as a proof of concept. Janet will run slower in a browser.
-Building with emscripten on windows is currently unsupported.
+5. Install, or otherwise add to your PATH the [WiX 3.11 Toolset](https://github.com/wixtoolset/wix3/releases)
+6. run `build_win dist`
+
+Now you should have an `.msi`. You can run `build_win install` to install the `.msi`, or execute the file itself.
 
 ### Meson
 
@@ -131,7 +137,7 @@ is maybe more convenient and flexible for integrating into existing pipelines.
 Meson also provides much better IDE integration than Make or batch files, as well as support
 for cross compilation.
 
-For the impatient, building with Meson is as simple as follows. The options provided to
+For the impatient, building with Meson is as follows. The options provided to
 `meson setup` below emulate Janet's Makefile.
 
 ```sh
@@ -140,6 +146,7 @@ cd janet
 meson setup build \
           --buildtype release \
           --optimization 2 \
+          --libdir /usr/local/lib \
           -Dgit_hash=$(git log --pretty=format:'%h' -n 1)
 ninja -C build
 
@@ -155,12 +162,13 @@ ninja -C build install
 Janet can be hacked on with pretty much any environment you like, but for IDE
 lovers, [Gnome Builder](https://wiki.gnome.org/Apps/Builder) is probably the
 best option, as it has excellent meson integration. It also offers code completion
-for Janet's C API right out of the box, which is very useful for exploring.
+for Janet's C API right out of the box, which is very useful for exploring. VSCode, Vim,
+Emacs, and Atom will have syntax packages for the Janet language, though.
 
 ## Installation
 
 See [the Introduction](https://janet-lang.org/introduction.html) for more details. If you just want
-to try out the language, you don't need to install anything. You can also simply move the `janet` executable wherever you want on your system and run it.
+to try out the language, you don't need to install anything. You can also move the `janet` executable wherever you want on your system and run it.
 
 ## Usage
 
@@ -171,42 +179,47 @@ If you are looking to explore, you can print a list of all available macros, fun
 by entering the command `(all-bindings)` into the repl.
 
 ```
-$ ./janet
-Janet 0.0.0 alpha  Copyright (C) 2017-2018 Calvin Rose
+$ janet
+Janet 1.7.1-dev-951e10f  Copyright (C) 2017-2020 Calvin Rose
 janet:1:> (+ 1 2 3)
 6
 janet:2:> (print "Hello, World!")
 Hello, World!
 nil
 janet:3:> (os/exit)
-$ ./janet -h
-usage: ./janet [options] scripts...
+$ janet -h
+usage: build/janet [options] script args...
 Options are:
-  -h Show this help
-  -v Print the version string
-  -s Use raw stdin instead of getline like functionality
-  -e Execute a string of janet
-  -r Enter the repl after running all scripts
-  -p Keep on executing if there is a top level error (persistent)
-  -- Stop handling option
-$
+  -h : Show this help
+  -v : Print the version string
+  -s : Use raw stdin instead of getline like functionality
+  -e code : Execute a string of janet
+  -r : Enter the repl after running all scripts
+  -p : Keep on executing if there is a top level error (persistent)
+  -q : Hide prompt, logo, and repl output (quiet)
+  -k : Compile scripts but do not execute (flycheck)
+  -m syspath : Set system path for loading global modules
+  -c source output : Compile janet source code into an image
+  -n : Disable ANSI color output in the repl
+  -l path : Execute code in a file before running the main script
+  -- : Stop handling options
 ```
 
-If installed, you can also run `man janet` to get usage information.
+If installed, you can also run `man janet` and `man jpm` to get usage information.
 
 ## Embedding
 
-The C API for Janet is not yet documented but coming soon.
-
-Janet can be embedded in a host program very easily. There is a make target
-`make amalg` which creates the file `build/janet.c`, which is a single C file
+Janet can be embedded in a host program very easily. The normal build
+will create a file `build/janet.c`, which is a single C file
 that contains all the source to Janet. This file, along with
-`src/include/janet.h` and `src/include/janetconf.h` can dragged into any C
+`src/include/janet.h` and `src/conf/janetconf.h` can be dragged into any C
 project and compiled into the project. Janet should be compiled with `-std=c99`
 on most compilers, and will need to be linked to the math library, `-lm`, and
 the dynamic linker, `-ldl`, if one wants to be able to load dynamic modules. If
 there is no need for dynamic modules, add the define
 `-DJANET_NO_DYNAMIC_MODULES` to the compiler options.
+
+See the [Embedding Section](https://janet-lang.org/capi/embedding.html) on the website for more information.
 
 ## Examples
 
@@ -219,10 +232,10 @@ Alternatively, check out [the #janet channel on Freenode](https://webchat.freeno
 
 ## FAQ
 
-### Why is my terminal is spitting out junk when I run the repl?
+### Why is my terminal spitting out junk when I run the repl?
 
 Make sure your terminal supports ANSI escape codes. Most modern terminals will
-support these, but some older terminals, windows consoles, or embedded terminals
+support these, but some older terminals, Windows consoles, or embedded terminals
 will not. If your terminal does not support ANSI escape codes, run the repl with
 the `-n` flag, which disables color output. You can also try the `-s` if further issues
 ensue.

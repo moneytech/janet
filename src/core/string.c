@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,18 +20,19 @@
 * IN THE SOFTWARE.
 */
 
-#include <string.h>
-
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
 #include "state.h"
 #endif
 
+#include <string.h>
+
 /* Begin building a string */
 uint8_t *janet_string_begin(int32_t length) {
-    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_STRING, sizeof(JanetStringHead) + length + 1);
+    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_STRING, sizeof(JanetStringHead) + (size_t) length + 1);
     head->length = length;
     uint8_t *data = (uint8_t *)head->data;
     data[length] = 0;
@@ -46,11 +47,11 @@ const uint8_t *janet_string_end(uint8_t *str) {
 
 /* Load a buffer as a string */
 const uint8_t *janet_string(const uint8_t *buf, int32_t len) {
-    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_STRING, sizeof(JanetStringHead) + len + 1);
+    JanetStringHead *head = janet_gcalloc(JANET_MEMORY_STRING, sizeof(JanetStringHead) + (size_t) len + 1);
     head->length = len;
     head->hash = janet_string_calchash(buf, len);
     uint8_t *data = (uint8_t *)head->data;
-    memcpy(data, buf, len);
+    safe_memcpy(data, buf, len);
     data[len] = 0;
     return data;
 }
@@ -61,7 +62,7 @@ int janet_string_compare(const uint8_t *lhs, const uint8_t *rhs) {
     int32_t ylen = janet_string_length(rhs);
     int32_t len = xlen > ylen ? ylen : xlen;
     int res = memcmp(lhs, rhs, len);
-    if (res) return res;
+    if (res) return res > 0 ? 1 : -1;
     if (xlen == ylen) return 0;
     return xlen < ylen ? -1 : 1;
 }
@@ -175,6 +176,18 @@ static Janet cfun_string_slice(int32_t argc, Janet *argv) {
     return janet_stringv(view.bytes + range.start, range.end - range.start);
 }
 
+static Janet cfun_symbol_slice(int32_t argc, Janet *argv) {
+    JanetByteView view = janet_getbytes(argv, 0);
+    JanetRange range = janet_getslice(argc, argv);
+    return janet_symbolv(view.bytes + range.start, range.end - range.start);
+}
+
+static Janet cfun_keyword_slice(int32_t argc, Janet *argv) {
+    JanetByteView view = janet_getbytes(argv, 0);
+    JanetRange range = janet_getslice(argc, argv);
+    return janet_keywordv(view.bytes + range.start, range.end - range.start);
+}
+
 static Janet cfun_string_repeat(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 2);
     JanetByteView view = janet_getbytes(argv, 0);
@@ -186,7 +199,7 @@ static Janet cfun_string_repeat(int32_t argc, Janet *argv) {
     uint8_t *newbuf = janet_string_begin((int32_t) mulres);
     uint8_t *end = newbuf + mulres;
     for (uint8_t *p = newbuf; p < end; p += view.len) {
-        memcpy(p, view.bytes, view.len);
+        safe_memcpy(p, view.bytes, view.len);
     }
     return janet_wrap_string(janet_string_end(newbuf));
 }
@@ -342,11 +355,11 @@ static Janet cfun_string_replace(int32_t argc, Janet *argv) {
         return janet_stringv(s.kmp.text, s.kmp.textlen);
     }
     buf = janet_string_begin(s.kmp.textlen - s.kmp.patlen + s.substlen);
-    memcpy(buf, s.kmp.text, result);
-    memcpy(buf + result, s.subst, s.substlen);
-    memcpy(buf + result + s.substlen,
-           s.kmp.text + result + s.kmp.patlen,
-           s.kmp.textlen - result - s.kmp.patlen);
+    safe_memcpy(buf, s.kmp.text, result);
+    safe_memcpy(buf + result, s.subst, s.substlen);
+    safe_memcpy(buf + result + s.substlen,
+                s.kmp.text + result + s.kmp.patlen,
+                s.kmp.textlen - result - s.kmp.patlen);
     kmp_deinit(&s.kmp);
     return janet_wrap_string(janet_string_end(buf));
 }
@@ -444,11 +457,11 @@ static Janet cfun_string_join(int32_t argc, Janet *argv) {
         const uint8_t *chunk = NULL;
         int32_t chunklen = 0;
         if (i) {
-            memcpy(out, joiner.bytes, joiner.len);
+            safe_memcpy(out, joiner.bytes, joiner.len);
             out += joiner.len;
         }
         janet_bytes_view(parts.items[i], &chunk, &chunklen);
-        memcpy(out, chunk, chunklen);
+        safe_memcpy(out, chunk, chunklen);
         out += chunklen;
     }
     return janet_wrap_string(janet_string_end(buf));
@@ -529,6 +542,16 @@ static const JanetReg string_cfuns[] = {
              "index (length bytes) to allow a full negative slice range. ")
     },
     {
+        "keyword/slice", cfun_keyword_slice,
+        JDOC("(keyword/slice bytes &opt start end)\n\n"
+             "Same a string/slice, but returns a keyword.")
+    },
+    {
+        "symbol/slice", cfun_symbol_slice,
+        JDOC("(symbol/slice bytes &opt start end)\n\n"
+             "Same a string/slice, but returns a symbol.")
+    },
+    {
         "string/repeat", cfun_string_repeat,
         JDOC("(string/repeat bytes n)\n\n"
              "Returns a string that is n copies of bytes concatenated.")
@@ -541,7 +564,7 @@ static const JanetReg string_cfuns[] = {
     {
         "string/from-bytes", cfun_string_frombytes,
         JDOC("(string/from-bytes & byte-vals)\n\n"
-             "Creates a string from integer params with byte values. All integers "
+             "Creates a string from integer parameters with byte values. All integers "
              "will be coerced to the range of 1 byte 0-255.")
     },
     {
@@ -572,7 +595,7 @@ static const JanetReg string_cfuns[] = {
     },
     {
         "string/find-all", cfun_string_findall,
-        JDOC("(string/find patt str)\n\n"
+        JDOC("(string/find-all patt str)\n\n"
              "Searches for all instances of pattern patt in string "
              "str. Returns an array of all indices of found patterns. Overlapping "
              "instances of the pattern are not counted, meaning a byte in string "
@@ -626,7 +649,7 @@ static const JanetReg string_cfuns[] = {
     {
         "string/format", cfun_string_format,
         JDOC("(string/format format & values)\n\n"
-             "Similar to snprintf, but specialized for operating with janet. Returns "
+             "Similar to snprintf, but specialized for operating with Janet values. Returns "
              "a new string.")
     },
     {

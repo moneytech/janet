@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "regalloc.h"
 #include "util.h"
@@ -66,7 +67,7 @@ void janetc_regalloc_clone(JanetcRegisterAllocator *dest, JanetcRegisterAllocato
     dest->count = src->count;
     dest->capacity = src->capacity;
     dest->max = src->max;
-    size = sizeof(uint32_t) * dest->capacity;
+    size = sizeof(uint32_t) * (size_t) dest->capacity;
     dest->regtemps = 0;
     if (size) {
         dest->chunks = malloc(size);
@@ -86,7 +87,7 @@ static void pushchunk(JanetcRegisterAllocator *ra) {
     int32_t newcount = ra->count + 1;
     if (newcount > ra->capacity) {
         int32_t newcapacity = newcount * 2;
-        ra->chunks = realloc(ra->chunks, newcapacity * sizeof(uint32_t));
+        ra->chunks = realloc(ra->chunks, (size_t) newcapacity * sizeof(uint32_t));
         if (!ra->chunks) {
             JANET_OUT_OF_MEMORY;
         }
@@ -144,7 +145,7 @@ void janetc_regalloc_free(JanetcRegisterAllocator *ra, int32_t reg) {
 int32_t janetc_regalloc_temp(JanetcRegisterAllocator *ra, JanetcRegisterTemp nth) {
     int32_t oldmax = ra->max;
     if (ra->regtemps & (1 << nth)) {
-        janet_exit("regtemp already allocated");
+        JANET_EXIT("regtemp already allocated");
     }
     ra->regtemps |= 1 << nth;
     int32_t reg = janetc_regalloc_1(ra);

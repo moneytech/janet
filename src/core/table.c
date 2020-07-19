@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -31,7 +32,7 @@
 
 static void *janet_memalloc_empty_local(int32_t count) {
     int32_t i;
-    void *mem = janet_smalloc(count * sizeof(JanetKV));
+    void *mem = janet_smalloc((size_t) count * sizeof(JanetKV));
     JanetKV *mmem = (JanetKV *)mem;
     for (i = 0; i < count; i++) {
         JanetKV *kv = mmem + i;
@@ -172,7 +173,7 @@ Janet janet_table_rawget(JanetTable *t, Janet key) {
 Janet janet_table_remove(JanetTable *t, Janet key) {
     JanetKV *bucket = janet_table_find(t, key);
     if (NULL != bucket && !janet_checktype(bucket->key, JANET_NIL)) {
-        Janet ret = bucket->key;
+        Janet ret = bucket->value;
         t->count--;
         t->deleted++;
         bucket->key = janet_wrap_nil();
@@ -240,7 +241,7 @@ JanetTable *janet_table_clone(JanetTable *table) {
     if (NULL == newTable->data) {
         JANET_OUT_OF_MEMORY;
     }
-    memcpy(newTable->data, table->data, table->capacity * sizeof(JanetKV));
+    memcpy(newTable->data, table->data, (size_t) table->capacity * sizeof(JanetKV));
     return newTable;
 }
 

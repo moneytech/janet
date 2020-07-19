@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Calvin Rose
+# Copyright (c) 2020 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -91,8 +91,8 @@
 # Assembly test
 # Fibonacci sequence, implemented with naive recursion.
 (def fibasm (asm '{
-  arity 1
-  bytecode [
+  :arity 1
+  :bytecode [
     (ltim 1 0 0x2)      # $1 = $0 < 2
     (jmpif 1 :done)     # if ($1) goto :done
     (lds 1)             # $1 = self
@@ -203,12 +203,12 @@
 (defn check-match
   [pat text should-match]
   (def result (peg/match pat text))
-  (assert (= (not should-match) (not result)) text))
+  (assert (= (not should-match) (not result)) (string "check-match " text)))
 
 (defn check-deep
   [pat text what]
   (def result (peg/match pat text))
-  (assert (deep= result what) text))
+  (assert (deep= result what) (string "check-deep " text)))
 
 # Just numbers
 

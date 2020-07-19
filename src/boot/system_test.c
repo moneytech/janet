@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -49,6 +49,21 @@ int system_test() {
 
     assert(janet_equals(janet_cstringv("a string."), janet_cstringv("a string.")));
     assert(janet_equals(janet_csymbolv("sym"), janet_csymbolv("sym")));
+
+    Janet *t1 = janet_tuple_begin(3);
+    t1[0] = janet_wrap_nil();
+    t1[1] = janet_wrap_integer(4);
+    t1[2] = janet_cstringv("hi");
+    Janet tuple1 = janet_wrap_tuple(janet_tuple_end(t1));
+
+    Janet *t2 = janet_tuple_begin(3);
+    t2[0] = janet_wrap_nil();
+    t2[1] = janet_wrap_integer(4);
+    t2[2] = janet_cstringv("hi");
+    Janet tuple2 = janet_wrap_tuple(janet_tuple_end(t2));
+
+    assert(janet_equals(tuple1, tuple2));
+
 
     return 0;
 }

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -40,6 +41,8 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_SSS, /* JOP_MULTIPLY, */
     JINT_SSI, /* JOP_DIVIDE_IMMEDIATE, */
     JINT_SSS, /* JOP_DIVIDE, */
+    JINT_SSS, /* JOP_MODULO, */
+    JINT_SSS, /* JOP_REMAINDER, */
     JINT_SSS, /* JOP_BAND, */
     JINT_SSS, /* JOP_BOR, */
     JINT_SSS, /* JOP_BXOR, */
@@ -55,6 +58,8 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_L, /* JOP_JUMP, */
     JINT_SL, /* JOP_JUMP_IF, */
     JINT_SL, /* JOP_JUMP_IF_NOT, */
+    JINT_SL, /* JOP_JUMP_IF_NIL, */
+    JINT_SL, /* JOP_JUMP_IF_NOT_NIL, */
     JINT_SSS, /* JOP_GREATER_THAN, */
     JINT_SSI, /* JOP_GREATER_THAN_IMMEDIATE, */
     JINT_SSS, /* JOP_LESS_THAN, */
@@ -93,15 +98,15 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_S, /* JOP_MAKE_TABLE */
     JINT_S, /* JOP_MAKE_TUPLE */
     JINT_S, /* JOP_MAKE_BRACKET_TUPLE */
-    JINT_SSS, /* JOP_NUMERIC_LESS_THAN */
-    JINT_SSS, /* JOP_NUMERIC_LESS_THAN_EQUAL */
-    JINT_SSS, /* JOP_NUMERIC_GREATER_THAN */
-    JINT_SSS, /* JOP_NUMERIC_GREATER_THAN_EQUAL */
-    JINT_SSS /* JOP_NUMERIC_EQUAL */
+    JINT_SSS, /* JOP_GREATER_THAN_EQUAL */
+    JINT_SSS, /* JOP_LESS_THAN_EQUAL */
+    JINT_SSS, /* JOP_NEXT */
+    JINT_SSS, /* JOP_NOT_EQUALS, */
+    JINT_SSI, /* JOP_NOT_EQUALS_IMMEDIATE, */
 };
 
 /* Verify some bytecode */
-int32_t janet_verify(JanetFuncDef *def) {
+int janet_verify(JanetFuncDef *def) {
     int vargs = !!(def->flags & JANET_FUNCDEF_FLAG_VARARG);
     int32_t i;
     int32_t maxslot = def->arity + vargs;
@@ -209,6 +214,7 @@ JanetFuncDef *janet_funcdef_alloc(void) {
     def->environments = NULL;
     def->constants = NULL;
     def->bytecode = NULL;
+    def->closure_bitset = NULL;
     def->flags = 0;
     def->slotcount = 0;
     def->arity = 0;

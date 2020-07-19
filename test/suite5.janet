@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Calvin Rose & contributors
+# Copyright (c) 2020 Calvin Rose & contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -57,6 +57,17 @@
 (assert (= (:length a) (length a)) "length method and function")
 
 (assert (= ((unmarshal (marshal b)) 3) (b 3)) "marshal")
+
+# Issue 408
+(assert-error :invalid-type (tarray/new :int32 10 1 0 (int/u64 7)) "tarray/new should only allow tarray or buffer for last argument")
+(def ta (tarray/new :int32 10))
+(assert (= (next a nil) 0) "tarray next 1")
+(assert (= (next a 0) 1) "tarray next 2")
+(assert (= (next a 8) 9) "tarray next 3")
+(assert (nil? (next a 9)) "tarray next 4")
+(put ta 3 7)
+(put ta 9 7)
+(assert (= 2 (count |(= $ 7) ta)) "tarray count")
 
 # Array remove
 

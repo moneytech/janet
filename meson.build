@@ -1,4 +1,4 @@
-# Copyright (c) 2019 Calvin Rose and contributors
+# Copyright (c) 2020 Calvin Rose and contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,7 +20,7 @@
 
 project('janet', 'c',
   default_options : ['c_std=c99', 'b_lundef=false', 'default_library=both'],
-  version : '1.5.1')
+  version : '1.11.0')
 
 # Global settings
 janet_path = join_paths(get_option('prefix'), get_option('libdir'), 'janet')
@@ -30,6 +30,7 @@ header_path = join_paths(get_option('prefix'), get_option('includedir'), 'janet'
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m', required : false)
 dl_dep = cc.find_library('dl', required : false)
+thread_dep = dependency('threads')
 
 # Link options
 if build_machine.system() != 'windows'
@@ -58,13 +59,18 @@ conf.set('JANET_NO_DOCSTRINGS', not get_option('docstrings'))
 conf.set('JANET_NO_SOURCEMAPS', not get_option('sourcemaps'))
 conf.set('JANET_NO_ASSEMBLER', not get_option('assembler'))
 conf.set('JANET_NO_PEG', not get_option('peg'))
+conf.set('JANET_NO_NET', not get_option('net'))
 conf.set('JANET_REDUCED_OS', get_option('reduced_os'))
 conf.set('JANET_NO_TYPED_ARRAY', not get_option('typed_array'))
 conf.set('JANET_NO_INT_TYPES', not get_option('int_types'))
+conf.set('JANET_NO_PRF', not get_option('prf'))
 conf.set('JANET_RECURSION_GUARD', get_option('recursion_guard'))
 conf.set('JANET_MAX_PROTO_DEPTH', get_option('max_proto_depth'))
 conf.set('JANET_MAX_MACRO_EXPAND', get_option('max_macro_expand'))
 conf.set('JANET_STACK_MAX', get_option('stack_max'))
+conf.set('JANET_NO_UMASK', not get_option('umask'))
+conf.set('JANET_NO_REALPATH', not get_option('realpath'))
+conf.set('JANET_NO_PROCESSES', not get_option('processes'))
 if get_option('os_name') != ''
   conf.set('JANET_OS_NAME', get_option('os_name'))
 endif
@@ -77,16 +83,10 @@ jconf = configure_file(output : 'janetconf.h',
 # Include directories
 incdir = include_directories(['src/include', '.'])
 
-# Building generated sources
-xxd = executable('xxd', 'tools/xxd.c', native : true)
-gen = generator(xxd,
-  output : '@BASENAME@.gen.c',
-  arguments : ['@INPUT@', '@OUTPUT@', '@EXTRA_ARGS@'])
-boot_gen = gen.process('src/boot/boot.janet', extra_args: 'janet_gen_boot')
-
 # Order is important here, as some headers
 # depend on other headers for the amalg target
 core_headers = [
+  'src/core/features.h',
   'src/core/util.h',
   'src/core/state.h',
   'src/core/gc.h',
@@ -116,6 +116,7 @@ core_src = [
   'src/core/io.c',
   'src/core/marsh.c',
   'src/core/math.c',
+  'src/core/net.c',
   'src/core/os.c',
   'src/core/parse.c',
   'src/core/peg.c',
@@ -128,6 +129,7 @@ core_src = [
   'src/core/struct.c',
   'src/core/symcache.c',
   'src/core/table.c',
+  'src/core/thread.c',
   'src/core/tuple.c',
   'src/core/typedarray.c',
   'src/core/util.c',
@@ -147,26 +149,31 @@ boot_src = [
 ]
 
 mainclient_src = [
-  'src/mainclient/line.c',
-  'src/mainclient/main.c'
+  'src/mainclient/shell.c'
 ]
 
 # Build boot binary
-janet_boot = executable('janet-boot', core_src, boot_src, boot_gen,
+janet_boot = executable('janet-boot', core_src, boot_src,
   include_directories : incdir,
   c_args : '-DJANET_BOOTSTRAP',
-  dependencies : [m_dep, dl_dep],
+  dependencies : [m_dep, dl_dep, thread_dep],
   native : true)
 
-# Build core image
-core_image = custom_target('core_image',
+# Build janet.c
+janetc = custom_target('janetc',
   input : [janet_boot],
-  output : 'core_image.gen.c',
-  command : [janet_boot, '@OUTPUT@', 'JANET_PATH', janet_path, 'JANET_HEADERPATH', header_path])
+  output : 'janet.c',
+  capture : true,
+  command : [
+    janet_boot, meson.current_source_dir(),
+    'JANET_PATH', janet_path, 'JANET_HEADERPATH', header_path
+  ])
 
-libjanet = library('janet', core_src, core_image,
+libjanet = library('janet', janetc,
   include_directories : incdir,
-  dependencies : [m_dep, dl_dep],
+  dependencies : [m_dep, dl_dep, thread_dep],
+  version: meson.project_version(),
+  soversion: version_parts[0] + '.' + version_parts[1],
   install : true)
 
 # Extra c flags - adding -fvisibility=hidden matches the Makefile and
@@ -184,16 +191,16 @@ else
   extra_cross_cflags = []
 endif
 
-janet_mainclient = executable('janet', core_src, core_image, mainclient_src,
+janet_mainclient = executable('janet', janetc, mainclient_src,
   include_directories : incdir,
-  dependencies : [m_dep, dl_dep],
+  dependencies : [m_dep, dl_dep, thread_dep],
   c_args : extra_native_cflags,
   install : true)
 
 if meson.is_cross_build()
-  janet_nativeclient = executable('janet-native', core_src, core_image, mainclient_src,
+  janet_nativeclient = executable('janet-native', janetc, mainclient_src,
     include_directories : incdir,
-    dependencies : [m_dep, dl_dep],
+    dependencies : [m_dep, dl_dep, thread_dep],
     c_args : extra_cross_cflags,
     native : true)
 else
@@ -207,25 +214,6 @@ docs = custom_target('docs',
   capture : true,
   command : [janet_nativeclient, '@INPUT@'])
 
-# Amalgamated source
-amalg = custom_target('amalg',
-  input : ['tools/amalg.janet', core_headers, core_src, core_image],
-  output : ['janet.c'],
-  capture : true,
-  command : [janet_nativeclient, '@INPUT@'])
-amalg_shell = custom_target('amalg-shell',
-  input : ['tools/amalg.janet', 'src/mainclient/line.h',
-    'src/mainclient/line.c', 'src/mainclient/main.c'],
-  output : ['shell.c'],
-  capture : true,
-  command : [janet_nativeclient, '@INPUT@'])
-
-# Amalgamated client
-janet_amalgclient = executable('janet-amalg', amalg, amalg_shell,
-  include_directories : incdir,
-  dependencies : [m_dep, dl_dep],
-  build_by_default : false)
-
 # Tests
 test_files = [
   'test/suite0.janet',
@@ -235,7 +223,9 @@ test_files = [
   'test/suite4.janet',
   'test/suite5.janet',
   'test/suite6.janet',
-  'test/suite7.janet'
+  'test/suite7.janet',
+  'test/suite8.janet',
+  'test/suite9.janet'
 ]
 foreach t : test_files
   test(t, janet_nativeclient, args : files([t]), workdir : meson.current_source_dir())
@@ -248,12 +238,25 @@ run_target('repl', command : [janet_nativeclient])
 janet_dep = declare_dependency(include_directories : incdir,
   link_with : libjanet)
 
+# pkgconfig
+pkg = import('pkgconfig')
+pkg.generate(libjanet,
+  description: 'Library for the Janet programming language.')
+
 # Installation
 install_man('janet.1')
-install_man('jpm.1')
 install_headers(['src/include/janet.h', jconf], subdir: 'janet')
-janet_binscripts = [
-  'auxbin/jpm'
-]
-install_data(sources : janet_binscripts, install_dir : 'bin')
-install_data(sources : ['tools/.keep'], install_dir : 'lib/janet')
+install_data(sources : ['tools/.keep'], install_dir : join_paths(get_option('libdir'), 'janet'))
+if get_option('peg') and not get_option('reduced_os') and get_option('processes')
+  install_man('jpm.1')
+  patched_jpm = custom_target('patched-jpm',
+    input : ['tools/patch-jpm.janet', 'jpm'],
+    install : true,
+    install_dir : get_option('bindir'),
+    build_by_default : true,
+    output : ['jpm'],
+    command : [janet_nativeclient, '@INPUT@', '@OUTPUT@',
+      '--binpath=' + join_paths(get_option('prefix'), get_option('bindir')),
+      '--libpath=' + join_paths(get_option('prefix'), get_option('libdir')),
+      '--headerpath=' + join_paths(get_option('prefix'), get_option('includedir'))])
+endif

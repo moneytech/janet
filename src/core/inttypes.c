@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose & contributors
+* Copyright (c) 2020 Calvin Rose & contributors
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,24 +20,43 @@
 * IN THE SOFTWARE.
 */
 
+#ifndef JANET_AMALG
+#include "features.h"
+#include <janet.h>
+#include "util.h"
+#endif
+
 #include <errno.h>
 #include <stdlib.h>
 #include <limits.h>
 #include <inttypes.h>
 #include <math.h>
 
-#ifndef JANET_AMALG
-#include <janet.h>
-#include "util.h"
-#endif
-
 /* Conditional compilation */
 #ifdef JANET_INT_TYPES
 
 #define MAX_INT_IN_DBL 9007199254740992ULL /* 2^53 */
 
-static Janet it_s64_get(void *p, Janet key);
-static Janet it_u64_get(void *p, Janet key);
+static int it_s64_get(void *p, Janet key, Janet *out);
+static int it_u64_get(void *p, Janet key, Janet *out);
+
+static int32_t janet_int64_hash(void *p1, size_t size) {
+    (void) size;
+    int32_t *words = p1;
+    return words[0] ^ words[1];
+}
+
+static int janet_int64_compare(void *p1, void *p2) {
+    int64_t x = *((int64_t *)p1);
+    int64_t y = *((int64_t *)p2);
+    return x == y ? 0 : x < y ? -1 : 1;
+}
+
+static int janet_uint64_compare(void *p1, void *p2) {
+    uint64_t x = *((uint64_t *)p1);
+    uint64_t y = *((uint64_t *)p2);
+    return x == y ? 0 : x < y ? -1 : 1;
+}
 
 static void int64_marshal(void *p, JanetMarshalContext *ctx) {
     janet_marshal_abstract(ctx, p);
@@ -62,7 +81,7 @@ static void it_u64_tostring(void *p, JanetBuffer *buffer) {
     janet_buffer_push_cstring(buffer, str);
 }
 
-static const JanetAbstractType it_s64_type = {
+const JanetAbstractType janet_s64_type = {
     "core/s64",
     NULL,
     NULL,
@@ -70,10 +89,13 @@ static const JanetAbstractType it_s64_type = {
     NULL,
     int64_marshal,
     int64_unmarshal,
-    it_s64_tostring
+    it_s64_tostring,
+    janet_int64_compare,
+    janet_int64_hash,
+    JANET_ATEND_HASH
 };
 
-static const JanetAbstractType it_u64_type = {
+const JanetAbstractType janet_u64_type = {
     "core/u64",
     NULL,
     NULL,
@@ -81,7 +103,10 @@ static const JanetAbstractType it_u64_type = {
     NULL,
     int64_marshal,
     int64_unmarshal,
-    it_u64_tostring
+    it_u64_tostring,
+    janet_uint64_compare,
+    janet_int64_hash,
+    JANET_ATEND_HASH
 };
 
 int64_t janet_unwrap_s64(Janet x) {
@@ -103,8 +128,8 @@ int64_t janet_unwrap_s64(Janet x) {
         }
         case JANET_ABSTRACT: {
             void *abst = janet_unwrap_abstract(x);
-            if (janet_abstract_type(abst) == &it_s64_type ||
-                    (janet_abstract_type(abst) == &it_u64_type))
+            if (janet_abstract_type(abst) == &janet_s64_type ||
+                    (janet_abstract_type(abst) == &janet_u64_type))
                 return *(int64_t *)abst;
             break;
         }
@@ -132,8 +157,8 @@ uint64_t janet_unwrap_u64(Janet x) {
         }
         case JANET_ABSTRACT: {
             void *abst = janet_unwrap_abstract(x);
-            if (janet_abstract_type(abst) == &it_s64_type ||
-                    (janet_abstract_type(abst) == &it_u64_type))
+            if (janet_abstract_type(abst) == &janet_s64_type ||
+                    (janet_abstract_type(abst) == &janet_u64_type))
                 return *(uint64_t *)abst;
             break;
         }
@@ -145,19 +170,19 @@ uint64_t janet_unwrap_u64(Janet x) {
 JanetIntType janet_is_int(Janet x) {
     if (!janet_checktype(x, JANET_ABSTRACT)) return JANET_INT_NONE;
     const JanetAbstractType *at = janet_abstract_type(janet_unwrap_abstract(x));
-    return (at == &it_s64_type) ? JANET_INT_S64 :
-           ((at == &it_u64_type) ? JANET_INT_U64 :
+    return (at == &janet_s64_type) ? JANET_INT_S64 :
+           ((at == &janet_u64_type) ? JANET_INT_U64 :
             JANET_INT_NONE);
 }
 
 Janet janet_wrap_s64(int64_t x) {
-    int64_t *box = janet_abstract(&it_s64_type, sizeof(int64_t));
+    int64_t *box = janet_abstract(&janet_s64_type, sizeof(int64_t));
     *box = (int64_t)x;
     return janet_wrap_abstract(box);
 }
 
 Janet janet_wrap_u64(uint64_t x) {
-    uint64_t *box = janet_abstract(&it_u64_type, sizeof(uint64_t));
+    uint64_t *box = janet_abstract(&janet_u64_type, sizeof(uint64_t));
     *box = (uint64_t)x;
     return janet_wrap_abstract(box);
 }
@@ -172,54 +197,171 @@ static Janet cfun_it_u64_new(int32_t argc, Janet *argv) {
     return janet_wrap_u64(janet_unwrap_u64(argv[0]));
 }
 
+// Code to support polymorphic comparison.
+//
+// int/u64 and int/s64 support a "compare" method that allows
+// comparison to each other, and to Janet numbers, using the
+// "compare" "compare<" ... functions.
+//
+// In the following code explicit casts are sometimes used to help
+// make it clear when int/float conversions are happening.
+//
+static int compare_double_double(double x, double y) {
+    return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+
+static int compare_int64_double(int64_t x, double y) {
+    if (isnan(y)) {
+        return 0; // clojure and python do this
+    } else if ((y > (- ((double) MAX_INT_IN_DBL))) && (y < ((double) MAX_INT_IN_DBL))) {
+        double dx = (double) x;
+        return compare_double_double(dx, y);
+    } else if (y > ((double) INT64_MAX)) {
+        return -1;
+    } else if (y < ((double) INT64_MIN)) {
+        return 1;
+    } else {
+        int64_t yi = (int64_t) y;
+        return (x < yi) ? -1 : ((x > yi) ? 1 : 0);
+    }
+}
+
+static int compare_uint64_double(uint64_t x, double y) {
+    if (isnan(y)) {
+        return 0; // clojure and python do this
+    } else if (y < 0) {
+        return 1;
+    } else if ((y >= 0) && (y < ((double) MAX_INT_IN_DBL))) {
+        double dx = (double) x;
+        return compare_double_double(dx, y);
+    } else if (y > ((double) UINT64_MAX)) {
+        return -1;
+    } else {
+        uint64_t yi = (uint64_t) y;
+        return (x < yi) ? -1 : ((x > yi) ? 1 : 0);
+    }
+}
+
+
+static Janet cfun_it_s64_compare(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 2);
+    if (janet_is_int(argv[0]) != JANET_INT_S64)
+        janet_panic("compare method requires int/s64 as first argument");
+    int64_t x = janet_unwrap_s64(argv[0]);
+    switch (janet_type(argv[1])) {
+        default:
+            break;
+        case JANET_NUMBER : {
+            double y = janet_unwrap_number(argv[1]);
+            return janet_wrap_number(compare_int64_double(x, y));
+        }
+        case JANET_ABSTRACT: {
+            void *abst = janet_unwrap_abstract(argv[1]);
+            if (janet_abstract_type(abst) == &janet_s64_type) {
+                int64_t y = *(int64_t *)abst;
+                return janet_wrap_number((x < y) ? -1 : (x > y ? 1 : 0));
+            } else if (janet_abstract_type(abst) == &janet_u64_type) {
+                // comparing signed to unsigned -- be careful!
+                uint64_t y = *(uint64_t *)abst;
+                if (x < 0) {
+                    return janet_wrap_number(-1);
+                } else if (y > INT64_MAX) {
+                    return janet_wrap_number(-1);
+                } else {
+                    int64_t y2 = (int64_t) y;
+                    return janet_wrap_number((x < y2) ? -1 : (x > y2 ? 1 : 0));
+                }
+            }
+            break;
+        }
+    }
+    return janet_wrap_nil();
+}
+
+static Janet cfun_it_u64_compare(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 2);
+    if (janet_is_int(argv[0]) != JANET_INT_U64)  // is this needed?
+        janet_panic("compare method requires int/u64 as first argument");
+    uint64_t x = janet_unwrap_u64(argv[0]);
+    switch (janet_type(argv[1])) {
+        default:
+            break;
+        case JANET_NUMBER : {
+            double y = janet_unwrap_number(argv[1]);
+            return janet_wrap_number(compare_uint64_double(x, y));
+        }
+        case JANET_ABSTRACT: {
+            void *abst = janet_unwrap_abstract(argv[1]);
+            if (janet_abstract_type(abst) == &janet_u64_type) {
+                uint64_t y = *(uint64_t *)abst;
+                return janet_wrap_number((x < y) ? -1 : (x > y ? 1 : 0));
+            } else if (janet_abstract_type(abst) == &janet_s64_type) {
+                // comparing unsigned to signed -- be careful!
+                int64_t y = *(int64_t *)abst;
+                if (y < 0) {
+                    return janet_wrap_number(1);
+                } else if (x > INT64_MAX) {
+                    return janet_wrap_number(1);
+                } else {
+                    int64_t x2 = (int64_t) x;
+                    return janet_wrap_number((x2 < y) ? -1 : (x2 > y ? 1 : 0));
+                }
+            }
+            break;
+        }
+    }
+    return janet_wrap_nil();
+}
+
 #define OPMETHOD(T, type, name, oper) \
 static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
     janet_arity(argc, 2, -1); \
-    T *box = janet_abstract(&it_##type##_type, sizeof(T)); \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
     *box = janet_unwrap_##type(argv[0]); \
-    for (int i = 1; i < argc; i++) \
+    for (int32_t i = 1; i < argc; i++) \
         *box oper##= janet_unwrap_##type(argv[i]); \
     return janet_wrap_abstract(box); \
 } \
- \
-static Janet cfun_it_##type##_##name##_mut(int32_t argc, Janet *argv) { \
-    janet_arity(argc, 2, -1); \
-    T *box = janet_getabstract(argv,0,&it_##type##_type); \
-    for (int i = 1; i < argc; i++) \
-        *box oper##= janet_unwrap_##type(argv[i]); \
+
+#define OPMETHODINVERT(T, type, name, oper) \
+static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
+    janet_fixarity(argc, 2); \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
+    *box = janet_unwrap_##type(argv[1]); \
+    *box oper##= janet_unwrap_##type(argv[0]); \
     return janet_wrap_abstract(box); \
-}
+} \
 
 #define DIVMETHOD(T, type, name, oper) \
 static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
     janet_arity(argc, 2, -1);                       \
-    T *box = janet_abstract(&it_##type##_type, sizeof(T)); \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
     *box = janet_unwrap_##type(argv[0]); \
-    for (int i = 1; i < argc; i++) { \
+    for (int32_t i = 1; i < argc; i++) { \
       T value = janet_unwrap_##type(argv[i]); \
       if (value == 0) janet_panic("division by zero"); \
       *box oper##= value; \
     } \
     return janet_wrap_abstract(box); \
 } \
- \
-static Janet cfun_it_##type##_##name##_mut(int32_t argc, Janet *argv) { \
-    janet_arity(argc, 2, -1); \
-    T *box = janet_getabstract(argv,0,&it_##type##_type); \
-    for (int i = 1; i < argc; i++) { \
-      T value =  janet_unwrap_##type(argv[i]); \
-      if (value == 0) janet_panic("division by zero"); \
-      *box oper##= value; \
-    } \
+
+#define DIVMETHODINVERT(T, type, name, oper) \
+static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
+    janet_fixarity(argc, 2);                       \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
+    *box = janet_unwrap_##type(argv[1]); \
+    T value = janet_unwrap_##type(argv[0]); \
+    if (value == 0) janet_panic("division by zero"); \
+    *box oper##= value; \
     return janet_wrap_abstract(box); \
-}
+} \
 
 #define DIVMETHOD_SIGNED(T, type, name, oper) \
 static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
     janet_arity(argc, 2, -1);                       \
-    T *box = janet_abstract(&it_##type##_type, sizeof(T)); \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
     *box = janet_unwrap_##type(argv[0]); \
-    for (int i = 1; i < argc; i++) { \
+    for (int32_t i = 1; i < argc; i++) { \
       T value = janet_unwrap_##type(argv[i]); \
       if (value == 0) janet_panic("division by zero"); \
       if ((value == -1) && (*box == INT64_MIN)) janet_panic("INT64_MIN divided by -1"); \
@@ -227,142 +369,145 @@ static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
     } \
     return janet_wrap_abstract(box); \
 } \
- \
-static Janet cfun_it_##type##_##name##_mut(int32_t argc, Janet *argv) { \
-    janet_arity(argc, 2, -1); \
-    T *box = janet_getabstract(argv,0,&it_##type##_type); \
-    for (int i = 1; i < argc; i++) { \
-      T value = janet_unwrap_##type(argv[i]); \
-      if (value == 0) janet_panic("division by zero"); \
-      if ((value == -1) && (*box == INT64_MIN)) janet_panic("INT64_MIN divided by -1"); \
-      *box oper##= value; \
-    } \
+
+#define DIVMETHODINVERT_SIGNED(T, type, name, oper) \
+static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
+    janet_fixarity(argc, 2);                       \
+    T *box = janet_abstract(&janet_##type##_type, sizeof(T)); \
+    *box = janet_unwrap_##type(argv[1]); \
+    T value = janet_unwrap_##type(argv[0]); \
+    if (value == 0) janet_panic("division by zero"); \
+    if ((value == -1) && (*box == INT64_MIN)) janet_panic("INT64_MIN divided by -1"); \
+    *box oper##= value; \
     return janet_wrap_abstract(box); \
+} \
+
+static Janet cfun_it_s64_mod(int32_t argc, Janet *argv) {
+    janet_arity(argc, 2, -1);
+    int64_t *box = janet_abstract(&janet_s64_type, sizeof(int64_t));
+    *box = janet_unwrap_s64(argv[0]);
+    for (int32_t i = 1; i < argc; i++) {
+        int64_t value = janet_unwrap_s64(argv[i]);
+        if (value == 0) janet_panic("division by zero");
+        int64_t x = *box % value;
+        if (x < 0) {
+            x = (*box < 0) ? x - *box : x + *box;
+        }
+        *box = x;
+    }
+    return janet_wrap_abstract(box);
 }
 
-#define COMPMETHOD(T, type, name, oper) \
-static Janet cfun_it_##type##_##name(int32_t argc, Janet *argv) { \
-    janet_fixarity(argc, 2); \
-    T v1 = janet_unwrap_##type(argv[0]); \
-    T v2 = janet_unwrap_##type(argv[1]); \
-    return janet_wrap_boolean(v1 oper v2); \
+static Janet cfun_it_s64_modi(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 2);
+    int64_t *box = janet_abstract(&janet_s64_type, sizeof(int64_t));
+    int64_t op1 = janet_unwrap_s64(argv[0]);
+    int64_t op2 = janet_unwrap_s64(argv[1]);
+    int64_t x = op1 % op2;
+    if (x < 0) {
+        x = (op1 < 0) ? x - op1 : x + op1;
+    }
+    *box = x;
+    return janet_wrap_abstract(box);
 }
 
 OPMETHOD(int64_t, s64, add, +)
 OPMETHOD(int64_t, s64, sub, -)
+OPMETHODINVERT(int64_t, s64, subi, -)
 OPMETHOD(int64_t, s64, mul, *)
 DIVMETHOD_SIGNED(int64_t, s64, div, /)
-DIVMETHOD_SIGNED(int64_t, s64, mod, %)
+DIVMETHOD_SIGNED(int64_t, s64, rem, %)
+DIVMETHODINVERT_SIGNED(int64_t, s64, divi, /)
+DIVMETHODINVERT_SIGNED(int64_t, s64, remi, %)
 OPMETHOD(int64_t, s64, and, &)
 OPMETHOD(int64_t, s64, or, |)
 OPMETHOD(int64_t, s64, xor, ^)
 OPMETHOD(int64_t, s64, lshift, <<)
 OPMETHOD(int64_t, s64, rshift, >>)
-COMPMETHOD(int64_t, s64, lt, <)
-COMPMETHOD(int64_t, s64, gt, >)
-COMPMETHOD(int64_t, s64, le, <=)
-COMPMETHOD(int64_t, s64, ge, >=)
-COMPMETHOD(int64_t, s64, eq, ==)
-COMPMETHOD(int64_t, s64, ne, !=)
-
 OPMETHOD(uint64_t, u64, add, +)
 OPMETHOD(uint64_t, u64, sub, -)
+OPMETHODINVERT(uint64_t, u64, subi, -)
 OPMETHOD(uint64_t, u64, mul, *)
 DIVMETHOD(uint64_t, u64, div, /)
 DIVMETHOD(uint64_t, u64, mod, %)
+DIVMETHODINVERT(uint64_t, u64, divi, /)
+DIVMETHODINVERT(uint64_t, u64, modi, %)
 OPMETHOD(uint64_t, u64, and, &)
 OPMETHOD(uint64_t, u64, or, |)
 OPMETHOD(uint64_t, u64, xor, ^)
 OPMETHOD(uint64_t, u64, lshift, <<)
 OPMETHOD(uint64_t, u64, rshift, >>)
-COMPMETHOD(uint64_t, u64, lt, <)
-COMPMETHOD(uint64_t, u64, gt, >)
-COMPMETHOD(uint64_t, u64, le, <=)
-COMPMETHOD(uint64_t, u64, ge, >=)
-COMPMETHOD(uint64_t, u64, eq, ==)
-COMPMETHOD(uint64_t, u64, ne, !=)
 
 #undef OPMETHOD
 #undef DIVMETHOD
 #undef DIVMETHOD_SIGNED
 #undef COMPMETHOD
 
+
 static JanetMethod it_s64_methods[] = {
     {"+", cfun_it_s64_add},
+    {"r+", cfun_it_s64_add},
     {"-", cfun_it_s64_sub},
+    {"r-", cfun_it_s64_subi},
     {"*", cfun_it_s64_mul},
+    {"r*", cfun_it_s64_mul},
     {"/", cfun_it_s64_div},
-    {"%", cfun_it_s64_mod},
-    {"<", cfun_it_s64_lt},
-    {">", cfun_it_s64_gt},
-    {"<=", cfun_it_s64_le},
-    {">=", cfun_it_s64_ge},
-    {"==", cfun_it_s64_eq},
-    {"!=", cfun_it_s64_ne},
+    {"r/", cfun_it_s64_divi},
+    {"mod", cfun_it_s64_mod},
+    {"rmod", cfun_it_s64_modi},
+    {"%", cfun_it_s64_rem},
+    {"r%", cfun_it_s64_remi},
     {"&", cfun_it_s64_and},
+    {"r&", cfun_it_s64_and},
     {"|", cfun_it_s64_or},
+    {"r|", cfun_it_s64_or},
     {"^", cfun_it_s64_xor},
+    {"r^", cfun_it_s64_xor},
     {"<<", cfun_it_s64_lshift},
     {">>", cfun_it_s64_rshift},
-
-    {"+!", cfun_it_s64_add_mut},
-    {"-!", cfun_it_s64_sub_mut},
-    {"*!", cfun_it_s64_mul_mut},
-    {"/!", cfun_it_s64_div_mut},
-    {"%!", cfun_it_s64_mod_mut},
-    {"&!", cfun_it_s64_and_mut},
-    {"|!", cfun_it_s64_or_mut},
-    {"^!", cfun_it_s64_xor_mut},
-    {"<<!", cfun_it_s64_lshift_mut},
-    {">>!", cfun_it_s64_rshift_mut},
+    {"compare", cfun_it_s64_compare},
 
     {NULL, NULL}
 };
 
 static JanetMethod it_u64_methods[] = {
     {"+", cfun_it_u64_add},
+    {"r+", cfun_it_u64_add},
     {"-", cfun_it_u64_sub},
+    {"r-", cfun_it_u64_subi},
     {"*", cfun_it_u64_mul},
+    {"r*", cfun_it_u64_mul},
     {"/", cfun_it_u64_div},
+    {"r/", cfun_it_u64_divi},
+    {"mod", cfun_it_u64_mod},
+    {"rmod", cfun_it_u64_modi},
     {"%", cfun_it_u64_mod},
-    {"<", cfun_it_u64_lt},
-    {">", cfun_it_u64_gt},
-    {"<=", cfun_it_u64_le},
-    {">=", cfun_it_u64_ge},
-    {"==", cfun_it_u64_eq},
-    {"!=", cfun_it_u64_ne},
+    {"r%", cfun_it_u64_modi},
     {"&", cfun_it_u64_and},
+    {"r&", cfun_it_u64_and},
     {"|", cfun_it_u64_or},
+    {"r|", cfun_it_u64_or},
     {"^", cfun_it_u64_xor},
+    {"r^", cfun_it_u64_xor},
     {"<<", cfun_it_u64_lshift},
     {">>", cfun_it_u64_rshift},
-
-    {"+!", cfun_it_u64_add_mut},
-    {"-!", cfun_it_u64_sub_mut},
-    {"*!", cfun_it_u64_mul_mut},
-    {"/!", cfun_it_u64_div_mut},
-    {"%!", cfun_it_u64_mod_mut},
-    {"&!", cfun_it_u64_and_mut},
-    {"|!", cfun_it_u64_or_mut},
-    {"^!", cfun_it_u64_xor_mut},
-    {"<<!", cfun_it_u64_lshift_mut},
-    {">>!", cfun_it_u64_rshift_mut},
+    {"compare", cfun_it_u64_compare},
 
     {NULL, NULL}
 };
 
-static Janet it_s64_get(void *p, Janet key) {
+static int it_s64_get(void *p, Janet key, Janet *out) {
     (void) p;
     if (!janet_checktype(key, JANET_KEYWORD))
-        janet_panicf("expected keyword, got %v", key);
-    return janet_getmethod(janet_unwrap_keyword(key), it_s64_methods);
+        return 0;
+    return janet_getmethod(janet_unwrap_keyword(key), it_s64_methods, out);
 }
 
-static Janet it_u64_get(void *p, Janet key) {
+static int it_u64_get(void *p, Janet key, Janet *out) {
     (void) p;
     if (!janet_checktype(key, JANET_KEYWORD))
-        janet_panicf("expected keyword, got %v", key);
-    return janet_getmethod(janet_unwrap_keyword(key), it_u64_methods);
+        return 0;
+    return janet_getmethod(janet_unwrap_keyword(key), it_u64_methods, out);
 }
 
 static const JanetReg it_cfuns[] = {
@@ -382,8 +527,8 @@ static const JanetReg it_cfuns[] = {
 /* Module entry point */
 void janet_lib_inttypes(JanetTable *env) {
     janet_core_cfuns(env, NULL, it_cfuns);
-    janet_register_abstract_type(&it_s64_type);
-    janet_register_abstract_type(&it_u64_type);
+    janet_register_abstract_type(&janet_s64_type);
+    janet_register_abstract_type(&janet_u64_type);
 }
 
 #endif

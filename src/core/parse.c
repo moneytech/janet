@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,9 +21,13 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "util.h"
 #endif
+
+#define JANET_PARSER_DEAD 0x1
+#define JANET_PARSER_GENERATED_ERROR 0x2
 
 /* Check if a character is whitespace */
 static int is_whitespace(uint8_t c) {
@@ -163,12 +167,12 @@ static void popstate(JanetParser *p, Janet val) {
     for (;;) {
         JanetParseState top = p->states[--p->statecount];
         JanetParseState *newtop = p->states + p->statecount - 1;
+        /* Source mapping info */
+        if (janet_checktype(val, JANET_TUPLE)) {
+            janet_tuple_sm_line(janet_unwrap_tuple(val)) = (int32_t) top.line;
+            janet_tuple_sm_column(janet_unwrap_tuple(val)) = (int32_t) top.column;
+        }
         if (newtop->flags & PFLAG_CONTAINER) {
-            /* Source mapping info */
-            if (janet_checktype(val, JANET_TUPLE)) {
-                janet_tuple_sm_line(janet_unwrap_tuple(val)) = (int32_t) top.line;
-                janet_tuple_sm_column(janet_unwrap_tuple(val)) = (int32_t) top.column;
-            }
             newtop->argn++;
             /* Keep track of number of values in the root state */
             if (p->statecount == 1) p->pending++;
@@ -200,6 +204,8 @@ static int checkescape(uint8_t c) {
         default:
             return -1;
         case 'x':
+        case 'u':
+        case 'U':
             return 1;
         case 'n':
             return '\n';
@@ -227,6 +233,24 @@ static int checkescape(uint8_t c) {
 /* Forward declare */
 static int stringchar(JanetParser *p, JanetParseState *state, uint8_t c);
 
+static void write_codepoint(JanetParser *p, int32_t codepoint) {
+    if (codepoint <= 0x7F) {
+        push_buf(p, (uint8_t) codepoint);
+    } else if (codepoint <= 0x7FF) {
+        push_buf(p, (uint8_t)((codepoint >>  6) & 0x1F) | 0xC0);
+        push_buf(p, (uint8_t)((codepoint >>  0) & 0x3F) | 0x80);
+    } else if (codepoint <= 0xFFFF) {
+        push_buf(p, (uint8_t)((codepoint >> 12) & 0x0F) | 0xE0);
+        push_buf(p, (uint8_t)((codepoint >>  6) & 0x3F) | 0x80);
+        push_buf(p, (uint8_t)((codepoint >>  0) & 0x3F) | 0x80);
+    } else {
+        push_buf(p, (uint8_t)((codepoint >> 18) & 0x07) | 0xF0);
+        push_buf(p, (uint8_t)((codepoint >> 12) & 0x3F) | 0x80);
+        push_buf(p, (uint8_t)((codepoint >>  6) & 0x3F) | 0x80);
+        push_buf(p, (uint8_t)((codepoint >>  0) & 0x3F) | 0x80);
+    }
+}
+
 static int escapeh(JanetParser *p, JanetParseState *state, uint8_t c) {
     int digit = to_hex(c);
     if (digit < 0) {
@@ -236,7 +260,27 @@ static int escapeh(JanetParser *p, JanetParseState *state, uint8_t c) {
     state->argn = (state->argn << 4) + digit;
     state->counter--;
     if (!state->counter) {
-        push_buf(p, (state->argn & 0xFF));
+        push_buf(p, (uint8_t)(state->argn & 0xFF));
+        state->argn = 0;
+        state->consumer = stringchar;
+    }
+    return 1;
+}
+
+static int escapeu(JanetParser *p, JanetParseState *state, uint8_t c) {
+    int digit = to_hex(c);
+    if (digit < 0) {
+        p->error = "invalid hex digit in unicode escape";
+        return 1;
+    }
+    state->argn = (state->argn << 4) + digit;
+    state->counter--;
+    if (!state->counter) {
+        if (state->argn > 0x10FFFF) {
+            p->error = "invalid unicode codepoint";
+            return 1;
+        }
+        write_codepoint(p, state->argn);
         state->argn = 0;
         state->consumer = stringchar;
     }
@@ -253,6 +297,10 @@ static int escape1(JanetParser *p, JanetParseState *state, uint8_t c) {
         state->counter = 2;
         state->argn = 0;
         state->consumer = escapeh;
+    } else if (c == 'u' || c == 'U') {
+        state->counter = c == 'u' ? 4 : 6;
+        state->argn = 0;
+        state->consumer = escapeu;
     } else {
         push_buf(p, (uint8_t) e);
         state->consumer = stringchar;
@@ -392,21 +440,23 @@ static Janet close_array(JanetParser *p, JanetParseState *state) {
 
 static Janet close_struct(JanetParser *p, JanetParseState *state) {
     JanetKV *st = janet_struct_begin(state->argn >> 1);
-    for (int32_t i = state->argn; i > 0; i -= 2) {
-        Janet value = p->args[--p->argcount];
-        Janet key = p->args[--p->argcount];
+    for (size_t i = p->argcount - state->argn; i < p->argcount; i += 2) {
+        Janet key = p->args[i];
+        Janet value = p->args[i + 1];
         janet_struct_put(st, key, value);
     }
+    p->argcount -= state->argn;
     return janet_wrap_struct(janet_struct_end(st));
 }
 
 static Janet close_table(JanetParser *p, JanetParseState *state) {
     JanetTable *table = janet_table(state->argn >> 1);
-    for (int32_t i = state->argn; i > 0; i -= 2) {
-        Janet value = p->args[--p->argcount];
-        Janet key = p->args[--p->argcount];
+    for (size_t i = p->argcount - state->argn; i < p->argcount; i += 2) {
+        Janet key = p->args[i];
+        Janet value = p->args[i + 1];
         janet_table_put(table, key, value);
     }
+    p->argcount -= state->argn;
     return janet_wrap_table(table);
 }
 
@@ -590,11 +640,30 @@ void janet_parser_eof(JanetParser *parser) {
     size_t oldline = parser->line;
     janet_parser_consume(parser, '\n');
     if (parser->statecount > 1) {
-        parser->error = "unexpected end of source";
+        JanetParseState *s = parser->states + (parser->statecount - 1);
+        JanetBuffer *buffer = janet_buffer(40);
+        janet_buffer_push_cstring(buffer, "unexpected end of source, ");
+        if (s->flags & PFLAG_PARENS) {
+            janet_buffer_push_u8(buffer, '(');
+        } else if (s->flags & PFLAG_SQRBRACKETS) {
+            janet_buffer_push_u8(buffer, '[');
+        } else if (s->flags & PFLAG_CURLYBRACKETS) {
+            janet_buffer_push_u8(buffer, '{');
+        } else if (s->flags & PFLAG_STRING) {
+            janet_buffer_push_u8(buffer, '"');
+        } else if (s->flags & PFLAG_LONGSTRING) {
+            int32_t i;
+            for (i = 0; i < s->argn; i++) {
+                janet_buffer_push_u8(buffer, '`');
+            }
+        }
+        janet_formatb(buffer, " opened at line %d, column %d", s->line, s->column);
+        parser->error = (const char *) janet_string(buffer->data, buffer->count);
+        parser->flag |= JANET_PARSER_GENERATED_ERROR;
     }
     parser->line = oldline;
     parser->column = oldcolumn;
-    parser->flag = 1;
+    parser->flag |= JANET_PARSER_DEAD;
 }
 
 enum JanetParserStatus janet_parser_status(JanetParser *parser) {
@@ -616,6 +685,7 @@ const char *janet_parser_error(JanetParser *parser) {
     if (status == JANET_PARSE_ERROR) {
         const char *e = parser->error;
         parser->error = NULL;
+        parser->flag &= ~JANET_PARSER_GENERATED_ERROR;
         janet_parser_flush(parser);
         return e;
     }
@@ -687,19 +757,18 @@ void janet_parser_clone(const JanetParser *src, JanetParser *dest) {
     if (dest->bufcap) {
         dest->buf = malloc(dest->bufcap);
         if (!dest->buf) goto nomem;
+        memcpy(dest->buf, src->buf, dest->bufcap);
     }
     if (dest->argcap) {
         dest->args = malloc(sizeof(Janet) * dest->argcap);
         if (!dest->args) goto nomem;
+        memcpy(dest->args, src->args, dest->argcap * sizeof(Janet));
     }
     if (dest->statecap) {
         dest->states = malloc(sizeof(JanetParseState) * dest->statecap);
         if (!dest->states) goto nomem;
+        memcpy(dest->states, src->states, dest->statecap * sizeof(JanetParseState));
     }
-
-    memcpy(dest->buf, src->buf, dest->bufcap);
-    memcpy(dest->args, src->args, dest->argcap * sizeof(Janet));
-    memcpy(dest->states, src->states, dest->statecap * sizeof(JanetParseState));
 
     return;
 
@@ -720,6 +789,9 @@ static int parsermark(void *p, size_t size) {
     for (i = 0; i < parser->argcount; i++) {
         janet_mark(parser->args[i]);
     }
+    if (parser->flag & JANET_PARSER_GENERATED_ERROR) {
+        janet_mark(janet_wrap_string((const uint8_t *) parser->error));
+    }
     return 0;
 }
 
@@ -730,31 +802,28 @@ static int parsergc(void *p, size_t size) {
     return 0;
 }
 
-static Janet parserget(void *p, Janet key);
+static int parserget(void *p, Janet key, Janet *out);
 
-static JanetAbstractType janet_parse_parsertype = {
+const JanetAbstractType janet_parser_type = {
     "core/parser",
     parsergc,
     parsermark,
     parserget,
-    NULL,
-    NULL,
-    NULL,
-    NULL
+    JANET_ATEND_GET
 };
 
 /* C Function parser */
 static Janet cfun_parse_parser(int32_t argc, Janet *argv) {
     (void) argv;
     janet_fixarity(argc, 0);
-    JanetParser *p = janet_abstract(&janet_parse_parsertype, sizeof(JanetParser));
+    JanetParser *p = janet_abstract(&janet_parser_type, sizeof(JanetParser));
     janet_parser_init(p);
     return janet_wrap_abstract(p);
 }
 
 static Janet cfun_parse_consume(int32_t argc, Janet *argv) {
     janet_arity(argc, 2, 3);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     JanetByteView view = janet_getbytes(argv, 1);
     if (argc == 3) {
         int32_t offset = janet_getinteger(argv, 2);
@@ -779,20 +848,21 @@ static Janet cfun_parse_consume(int32_t argc, Janet *argv) {
 
 static Janet cfun_parse_eof(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     janet_parser_eof(p);
     return argv[0];
 }
 
 static Janet cfun_parse_insert(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 2);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     JanetParseState *s = p->states + p->statecount - 1;
     if (s->consumer == tokenchar) {
         janet_parser_consume(p, ' ');
         p->column--;
         s = p->states + p->statecount - 1;
     }
+    if (s->flags & PFLAG_COMMENT) s--;
     if (s->flags & PFLAG_CONTAINER) {
         s->argn++;
         if (p->statecount == 1) p->pending++;
@@ -809,7 +879,7 @@ static Janet cfun_parse_insert(int32_t argc, Janet *argv) {
             }
             p->bufcap = newcap;
         }
-        memcpy(p->buf + p->bufcount, str, slen);
+        safe_memcpy(p->buf + p->bufcount, str, slen);
         p->bufcount = newcount;
     } else {
         janet_panic("cannot insert value into parser");
@@ -819,13 +889,13 @@ static Janet cfun_parse_insert(int32_t argc, Janet *argv) {
 
 static Janet cfun_parse_has_more(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     return janet_wrap_boolean(janet_parser_has_more(p));
 }
 
 static Janet cfun_parse_byte(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 2);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     int32_t i = janet_getinteger(argv, 1);
     janet_parser_consume(p, 0xFF & i);
     return argv[0];
@@ -833,7 +903,7 @@ static Janet cfun_parse_byte(int32_t argc, Janet *argv) {
 
 static Janet cfun_parse_status(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     const char *stat = NULL;
     switch (janet_parser_status(p)) {
         case JANET_PARSE_PENDING:
@@ -854,28 +924,32 @@ static Janet cfun_parse_status(int32_t argc, Janet *argv) {
 
 static Janet cfun_parse_error(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     const char *err = janet_parser_error(p);
-    if (err) return janet_cstringv(err);
+    if (err) {
+        return (p->flag & JANET_PARSER_GENERATED_ERROR)
+               ? janet_wrap_string((const uint8_t *) err)
+               : janet_cstringv(err);
+    }
     return janet_wrap_nil();
 }
 
 static Janet cfun_parse_produce(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     return janet_parser_produce(p);
 }
 
 static Janet cfun_parse_flush(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     janet_parser_flush(p);
     return argv[0];
 }
 
 static Janet cfun_parse_where(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     Janet *tup = janet_tuple_begin(2);
     tup[0] = janet_wrap_integer(p->line);
     tup[1] = janet_wrap_integer(p->column);
@@ -892,7 +966,7 @@ static Janet janet_wrap_parse_state(JanetParseState *s, Janet *args,
     if (s->flags & PFLAG_CONTAINER) {
         JanetArray *container_args = janet_array(s->argn);
         container_args->count = s->argn;
-        memcpy(container_args->data, args, sizeof(args[0])*s->argn);
+        safe_memcpy(container_args->data, args, sizeof(args[0])*s->argn);
         janet_table_put(state, janet_ckeywordv("args"),
                         janet_wrap_array(container_args));
     }
@@ -955,31 +1029,30 @@ struct ParserStateGetter {
 };
 
 static Janet parser_state_delimiters(const JanetParser *_p) {
-    JanetParser *clone = janet_abstract(&janet_parse_parsertype, sizeof(JanetParser));
-    janet_parser_clone(_p, clone);
+    JanetParser *p = (JanetParser *)_p;
     size_t i;
     const uint8_t *str;
     size_t oldcount;
-    oldcount = clone->bufcount;
-    for (i = 0; i < clone->statecount; i++) {
-        JanetParseState *s = clone->states + i;
+    oldcount = p->bufcount;
+    for (i = 0; i < p->statecount; i++) {
+        JanetParseState *s = p->states + i;
         if (s->flags & PFLAG_PARENS) {
-            push_buf(clone, '(');
+            push_buf(p, '(');
         } else if (s->flags & PFLAG_SQRBRACKETS) {
-            push_buf(clone, '[');
+            push_buf(p, '[');
         } else if (s->flags & PFLAG_CURLYBRACKETS) {
-            push_buf(clone, '{');
+            push_buf(p, '{');
         } else if (s->flags & PFLAG_STRING) {
-            push_buf(clone, '"');
+            push_buf(p, '"');
         } else if (s->flags & PFLAG_LONGSTRING) {
             int32_t i;
             for (i = 0; i < s->argn; i++) {
-                push_buf(clone, '`');
+                push_buf(p, '`');
             }
         }
     }
-    str = janet_string(clone->buf + oldcount, (int32_t)(clone->bufcount - oldcount));
-    clone->bufcount = oldcount;
+    str = janet_string(p->buf + oldcount, (int32_t)(p->bufcount - oldcount));
+    p->bufcount = oldcount;
     return janet_wrap_string(str);
 }
 
@@ -1006,7 +1079,7 @@ static const struct ParserStateGetter parser_state_getters[] = {
 static Janet cfun_parse_state(int32_t argc, Janet *argv) {
     janet_arity(argc, 1, 2);
     const uint8_t *key = NULL;
-    JanetParser *p = janet_getabstract(argv, 0, &janet_parse_parsertype);
+    JanetParser *p = janet_getabstract(argv, 0, &janet_parser_type);
     if (argc == 2) {
         key = janet_getkeyword(argv, 1);
     }
@@ -1033,8 +1106,8 @@ static Janet cfun_parse_state(int32_t argc, Janet *argv) {
 
 static Janet cfun_parse_clone(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
-    JanetParser *src = janet_getabstract(argv, 0, &janet_parse_parsertype);
-    JanetParser *dest = janet_abstract(&janet_parse_parsertype, sizeof(JanetParser));
+    JanetParser *src = janet_getabstract(argv, 0, &janet_parser_type);
+    JanetParser *dest = janet_abstract(&janet_parser_type, sizeof(JanetParser));
     janet_parser_clone(src, dest);
     return janet_wrap_abstract(dest);
 }
@@ -1055,10 +1128,10 @@ static const JanetMethod parser_methods[] = {
     {NULL, NULL}
 };
 
-static Janet parserget(void *p, Janet key) {
+static int parserget(void *p, Janet key, Janet *out) {
     (void) p;
-    if (!janet_checktype(key, JANET_KEYWORD)) janet_panicf("expected keyword method");
-    return janet_getmethod(janet_unwrap_keyword(key), parser_methods);
+    if (!janet_checktype(key, JANET_KEYWORD)) return 0;
+    return janet_getmethod(janet_unwrap_keyword(key), parser_methods, out);
 }
 
 static const JanetReg parse_cfuns[] = {
@@ -1066,7 +1139,7 @@ static const JanetReg parse_cfuns[] = {
         "parser/new", cfun_parse_parser,
         JDOC("(parser/new)\n\n"
              "Creates and returns a new parser object. Parsers are state machines "
-             "that can receive bytes, and generate a stream of janet values.")
+             "that can receive bytes, and generate a stream of values.")
     },
     {
         "parser/clone", cfun_parse_clone,

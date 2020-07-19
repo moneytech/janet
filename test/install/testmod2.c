@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose and contributors
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,17 +20,21 @@
 * IN THE SOFTWARE.
 */
 
-#ifndef JANET_LINE_H_defined
-#define JANET_LINE_H_defined
+/* A very simple native module */
 
-#ifndef JANET_AMALG
 #include <janet.h>
-#endif
 
-void janet_line_init();
-void janet_line_deinit();
+static Janet cfun_get_six(int32_t argc, Janet *argv) {
+    (void) argv;
+    janet_fixarity(argc, 0);
+    return janet_wrap_number(6.0);
+}
 
-void janet_line_get(const char *p, JanetBuffer *buffer);
-Janet janet_line_getter(int32_t argc, Janet *argv);
+static const JanetReg array_cfuns[] = {
+    {"get6", cfun_get_six, NULL},
+    {NULL, NULL, NULL}
+};
 
-#endif
+JANET_MODULE_ENTRY(JanetTable *env) {
+    janet_cfuns(env, NULL, array_cfuns);
+}

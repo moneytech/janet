@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2020 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -31,8 +32,8 @@
 JanetBuffer *janet_buffer_init(JanetBuffer *buffer, int32_t capacity) {
     uint8_t *data = NULL;
     if (capacity > 0) {
-        janet_vm_next_collection += capacity;
-        data = malloc(sizeof(uint8_t) * capacity);
+        janet_gcpressure(capacity);
+        data = malloc(sizeof(uint8_t) * (size_t) capacity);
         if (NULL == data) {
             JANET_OUT_OF_MEMORY;
         }
@@ -61,8 +62,8 @@ void janet_buffer_ensure(JanetBuffer *buffer, int32_t capacity, int32_t growth) 
     if (capacity <= buffer->capacity) return;
     int64_t big_capacity = ((int64_t) capacity) * growth;
     capacity = big_capacity > INT32_MAX ? INT32_MAX : (int32_t) big_capacity;
-    janet_vm_next_collection += capacity - buffer->capacity;
-    new_data = realloc(old, capacity * sizeof(uint8_t));
+    janet_gcpressure(capacity - buffer->capacity);
+    new_data = realloc(old, (size_t) capacity * sizeof(uint8_t));
     if (NULL == new_data) {
         JANET_OUT_OF_MEMORY;
     }
@@ -93,7 +94,7 @@ void janet_buffer_extra(JanetBuffer *buffer, int32_t n) {
     if (new_size > buffer->capacity) {
         int32_t new_capacity = new_size * 2;
         uint8_t *new_data = realloc(buffer->data, new_capacity * sizeof(uint8_t));
-        janet_vm_next_collection += new_capacity - buffer->capacity;
+        janet_gcpressure(new_capacity - buffer->capacity);
         if (NULL == new_data) {
             JANET_OUT_OF_MEMORY;
         }
@@ -111,6 +112,7 @@ void janet_buffer_push_cstring(JanetBuffer *buffer, const char *cstring) {
 
 /* Push multiple bytes into the buffer */
 void janet_buffer_push_bytes(JanetBuffer *buffer, const uint8_t *string, int32_t length) {
+    if (0 == length) return;
     janet_buffer_extra(buffer, length);
     memcpy(buffer->data + buffer->count, string, length);
     buffer->count += length;
@@ -180,6 +182,39 @@ static Janet cfun_buffer_new_filled(int32_t argc, Janet *argv) {
         memset(buffer->data, byte, count);
     buffer->count = count;
     return janet_wrap_buffer(buffer);
+}
+
+static Janet cfun_buffer_fill(int32_t argc, Janet *argv) {
+    janet_arity(argc, 1, 2);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int32_t byte = 0;
+    if (argc == 2) {
+        byte = janet_getinteger(argv, 1) & 0xFF;
+    }
+    if (buffer->count) {
+        memset(buffer->data, byte, buffer->count);
+    }
+    return argv[0];
+}
+
+static Janet cfun_buffer_trim(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    if (buffer->count) {
+        if (buffer->count < buffer->capacity) {
+            uint8_t *newData = realloc(buffer->data, buffer->count);
+            if (NULL == newData) {
+                JANET_OUT_OF_MEMORY;
+            }
+            buffer->data = newData;
+            buffer->capacity = buffer->count;
+        }
+    } else {
+        buffer->capacity = 0;
+        free(buffer->data);
+        buffer->data = NULL;
+    }
+    return argv[0];
 }
 
 static Janet cfun_buffer_u8(int32_t argc, Janet *argv) {
@@ -319,16 +354,20 @@ static Janet cfun_buffer_blit(int32_t argc, Janet *argv) {
     } else {
         length_src = src.len - offset_src;
     }
-    int64_t last = ((int64_t) offset_dest - offset_src) + length_src;
+    int64_t last = (int64_t) offset_dest + length_src;
     if (last > INT32_MAX)
         janet_panic("buffer blit out of range");
-    janet_buffer_ensure(dest, (int32_t) last, 2);
-    if (last > dest->count) dest->count = (int32_t) last;
-    if (same_buf) {
-        src.bytes = dest->data;
-        memmove(dest->data + offset_dest, src.bytes + offset_src, length_src);
-    } else {
-        memcpy(dest->data + offset_dest, src.bytes + offset_src, length_src);
+    int32_t last32 = (int32_t) last;
+    janet_buffer_ensure(dest, last32, 2);
+    if (last32 > dest->count) dest->count = last32;
+    if (length_src) {
+        if (same_buf) {
+            /* janet_buffer_ensure may have invalidated src */
+            src.bytes = dest->data;
+            memmove(dest->data + offset_dest, src.bytes + offset_src, length_src);
+        } else {
+            memcpy(dest->data + offset_dest, src.bytes + offset_src, length_src);
+        }
     }
     return argv[0];
 }
@@ -345,14 +384,26 @@ static const JanetReg buffer_cfuns[] = {
     {
         "buffer/new", cfun_buffer_new,
         JDOC("(buffer/new capacity)\n\n"
-             "Creates a new, empty buffer with enough memory for capacity bytes. "
-             "Returns a new buffer.")
+             "Creates a new, empty buffer with enough backing memory for capacity bytes. "
+             "Returns a new buffer of length 0.")
     },
     {
         "buffer/new-filled", cfun_buffer_new_filled,
         JDOC("(buffer/new-filled count &opt byte)\n\n"
              "Creates a new buffer of length count filled with byte. By default, byte is 0. "
              "Returns the new buffer.")
+    },
+    {
+        "buffer/fill", cfun_buffer_fill,
+        JDOC("(buffer/fill buffer &opt byte)\n\n"
+             "Fill up a buffer with bytes, defaulting to 0s. Does not change the buffer's length. "
+             "Returns the modified buffer.")
+    },
+    {
+        "buffer/trim", cfun_buffer_trim,
+        JDOC("(buffer/trim buffer)\n\n"
+             "Set the backing capacity of the buffer to the current length of the buffer. Returns the "
+             "modified buffer.")
     },
     {
         "buffer/push-byte", cfun_buffer_u8,
@@ -364,7 +415,7 @@ static const JanetReg buffer_cfuns[] = {
         "buffer/push-word", cfun_buffer_word,
         JDOC("(buffer/push-word buffer x)\n\n"
              "Append a machine word to a buffer. The 4 bytes of the integer are appended "
-             "in twos complement, big endian order, unsigned. Returns the modified buffer. Will "
+             "in twos complement, little endian order, unsigned. Returns the modified buffer. Will "
              "throw an error if the buffer overflows.")
     },
     {
@@ -415,7 +466,7 @@ static const JanetReg buffer_cfuns[] = {
     },
     {
         "buffer/blit", cfun_buffer_blit,
-        JDOC("(buffer/blit dest src & opt dest-start src-start src-end)\n\n"
+        JDOC("(buffer/blit dest src &opt dest-start src-start src-end)\n\n"
              "Insert the contents of src into dest. Can optionally take indices that "
              "indicate which part of src to copy into which part of dest. Indices can be "
              "negative to index from the end of src or dest. Returns dest.")
