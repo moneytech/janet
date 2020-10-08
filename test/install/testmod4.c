@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2020 Calvin Rose
+* Copyright (c) 2020 Calvin Rose and contributors
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -20,36 +20,21 @@
 * IN THE SOFTWARE.
 */
 
-/* Feature test macros */
+/* A very simple native module */
 
-#ifndef JANET_FEATURES_H_defined
-#define JANET_FEATURES_H_defined
+#include <janet.h>
 
-#if defined(__NetBSD__) || defined(__APPLE__) || defined(__OpenBSD__) \
-    || defined(__bsdi__) || defined(__DragonFly__)
-/* Use BSD soucre on any BSD systems, include OSX */
-# define _BSD_SOURCE
-#else
-/* Use POSIX feature flags */
-# ifndef _POSIX_C_SOURCE
-# define _POSIX_C_SOURCE 200809L
-# endif
-#endif
+static Janet cfun_get_eight(int32_t argc, Janet *argv) {
+    (void) argv;
+    janet_fixarity(argc, 0);
+    return janet_wrap_number(8.0);
+}
 
-#if defined(WIN32) || defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#endif
+static const JanetReg array_cfuns[] = {
+    {"get8", cfun_get_eight, NULL},
+    {NULL, NULL, NULL}
+};
 
-/* Needed for realpath on linux */
-#if !defined(_XOPEN_SOURCE) && (defined(__linux__) || defined(__EMSCRIPTEN__))
-#define _XOPEN_SOURCE 500
-#endif
-
-/* Needed for timegm and other extensions when building with -std=c99.
- * It also defines realpath, etc, which would normally require
- * _XOPEN_SOURCE >= 500. */
-#if !defined(_NETBSD_SOURCE) && defined(__NetBSD__)
-#define _NETBSD_SOURCE
-#endif
-
-#endif
+JANET_MODULE_ENTRY(JanetTable *env) {
+    janet_cfuns(env, NULL, array_cfuns);
+}

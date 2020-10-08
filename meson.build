@@ -20,7 +20,7 @@
 
 project('janet', 'c',
   default_options : ['c_std=c99', 'b_lundef=false', 'default_library=both'],
-  version : '1.11.0')
+  version : '1.13.0')
 
 # Global settings
 janet_path = join_paths(get_option('prefix'), get_option('libdir'), 'janet')
@@ -63,7 +63,7 @@ conf.set('JANET_NO_NET', not get_option('net'))
 conf.set('JANET_REDUCED_OS', get_option('reduced_os'))
 conf.set('JANET_NO_TYPED_ARRAY', not get_option('typed_array'))
 conf.set('JANET_NO_INT_TYPES', not get_option('int_types'))
-conf.set('JANET_NO_PRF', not get_option('prf'))
+conf.set('JANET_PRF', get_option('prf'))
 conf.set('JANET_RECURSION_GUARD', get_option('recursion_guard'))
 conf.set('JANET_MAX_PROTO_DEPTH', get_option('max_proto_depth'))
 conf.set('JANET_MAX_MACRO_EXPAND', get_option('max_macro_expand'))
@@ -71,6 +71,7 @@ conf.set('JANET_STACK_MAX', get_option('stack_max'))
 conf.set('JANET_NO_UMASK', not get_option('umask'))
 conf.set('JANET_NO_REALPATH', not get_option('realpath'))
 conf.set('JANET_NO_PROCESSES', not get_option('processes'))
+conf.set('JANET_SIMPLE_GETLINE', get_option('simple_getline'))
 if get_option('os_name') != ''
   conf.set('JANET_OS_NAME', get_option('os_name'))
 endif
@@ -178,30 +179,28 @@ libjanet = library('janet', janetc,
 
 # Extra c flags - adding -fvisibility=hidden matches the Makefile and
 # shaves off about 10k on linux x64, likely similar on other platforms.
-native_cc = meson.get_compiler('c', native: true)
-cross_cc = meson.get_compiler('c', native: false)
-if native_cc.has_argument('-fvisibility=hidden')
-  extra_native_cflags = ['-fvisibility=hidden']
+if cc.has_argument('-fvisibility=hidden')
+  extra_cflags = ['-fvisibility=hidden']
 else
-  extra_native_cflags = []
+  extra_cflags = []
 endif
-if cross_cc.has_argument('-fvisibility=hidden')
-  extra_cross_cflags = ['-fvisibility=hidden']
-else
-  extra_cross_cflags = []
-endif
-
 janet_mainclient = executable('janet', janetc, mainclient_src,
   include_directories : incdir,
   dependencies : [m_dep, dl_dep, thread_dep],
-  c_args : extra_native_cflags,
+  c_args : extra_cflags,
   install : true)
 
 if meson.is_cross_build()
+  native_cc = meson.get_compiler('c', native: true)
+  if native_cc.has_argument('-fvisibility=hidden')
+    extra_native_cflags = ['-fvisibility=hidden']
+  else
+    extra_native_cflags = []
+  endif
   janet_nativeclient = executable('janet-native', janetc, mainclient_src,
     include_directories : incdir,
     dependencies : [m_dep, dl_dep, thread_dep],
-    c_args : extra_cross_cflags,
+    c_args : extra_native_cflags,
     native : true)
 else
   janet_nativeclient = janet_mainclient
@@ -216,16 +215,17 @@ docs = custom_target('docs',
 
 # Tests
 test_files = [
-  'test/suite0.janet',
-  'test/suite1.janet',
-  'test/suite2.janet',
-  'test/suite3.janet',
-  'test/suite4.janet',
-  'test/suite5.janet',
-  'test/suite6.janet',
-  'test/suite7.janet',
-  'test/suite8.janet',
-  'test/suite9.janet'
+  'test/suite0000.janet',
+  'test/suite0001.janet',
+  'test/suite0002.janet',
+  'test/suite0003.janet',
+  'test/suite0004.janet',
+  'test/suite0005.janet',
+  'test/suite0006.janet',
+  'test/suite0007.janet',
+  'test/suite0008.janet',
+  'test/suite0009.janet',
+  'test/suite0010.janet'
 ]
 foreach t : test_files
   test(t, janet_nativeclient, args : files([t]), workdir : meson.current_source_dir())

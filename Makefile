@@ -41,10 +41,10 @@ SONAME_SETTER=-Wl,-soname,
 # For cross compilation
 HOSTCC?=$(CC)
 HOSTAR?=$(AR)
-CFLAGS?=-fPIC -O2
+CFLAGS?=-O2
 LDFLAGS?=-rdynamic
 
-COMMON_CFLAGS:=-std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fvisibility=hidden
+COMMON_CFLAGS:=-std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fvisibility=hidden -fPIC
 BOOT_CFLAGS:=-DJANET_BOOTSTRAP -DJANET_BUILD=$(JANET_BUILD) -O0 -g $(COMMON_CFLAGS)
 BUILD_CFLAGS:=$(CFLAGS) $(COMMON_CFLAGS)
 
@@ -149,13 +149,14 @@ build/janet_boot: $(JANET_BOOT_OBJECTS)
 
 # Now the reason we bootstrap in the first place
 build/janet.c: build/janet_boot src/boot/boot.janet
-	build/janet_boot . JANET_PATH '$(JANET_PATH)' JANET_HEADERPATH '$(INCLUDEDIR)/janet' > $@
+	build/janet_boot . JANET_PATH '$(JANET_PATH)' > $@
+	cksum $@
 
 ########################
 ##### Amalgamation #####
 ########################
 
-SONAME=libjanet.so.1.10
+SONAME=libjanet.so.1.12
 
 build/shell.c: src/mainclient/shell.c
 	cp $< $@
@@ -260,7 +261,7 @@ build/janet.pc: $(JANET_TARGET)
 	echo 'Libs: -L$${libdir} -ljanet' >> $@
 	echo 'Libs.private: $(CLIBS)' >> $@
 
-install: $(JANET_TARGET) build/janet.pc build/jpm
+install: $(JANET_TARGET) $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/janet.pc build/jpm
 	mkdir -p '$(DESTDIR)$(BINDIR)'
 	cp $(JANET_TARGET) '$(DESTDIR)$(BINDIR)/janet'
 	mkdir -p '$(DESTDIR)$(INCLUDEDIR)/janet'
@@ -317,7 +318,6 @@ test-install:
 	cd test/install && jpm --verbose --test --modpath=./modpath install https://github.com/janet-lang/jhydro.git
 	cd test/install && jpm --verbose --test --modpath=./modpath install https://github.com/janet-lang/path.git
 	cd test/install && jpm --verbose --test --modpath=./modpath install https://github.com/janet-lang/argparse.git
-	cd test/install && jpm --verbose --modpath=./modpath install https://github.com/bakpakin/x43bot.git
 
 help:
 	@echo

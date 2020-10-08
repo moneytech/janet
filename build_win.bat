@@ -102,6 +102,7 @@ exit /b 0
 mkdir dist
 janet.exe tools\gendoc.janet > dist\doc.html
 janet.exe tools\removecr.janet dist\doc.html
+janet.exe tools\removecr.janet build\janet.c
 
 copy build\janet.c dist\janet.c
 copy src\mainclient\shell.c dist\shell.c
@@ -167,8 +168,6 @@ call jpm --verbose --test --modpath=. install https://github.com/janet-lang/jhyd
 call jpm --verbose --test --modpath=. install https://github.com/janet-lang/path.git
 @if errorlevel 1 goto :TESTINSTALLFAIL
 call jpm --verbose --test --modpath=. install https://github.com/janet-lang/argparse.git
-@if errorlevel 1 goto :TESTINSTALLFAIL
-call jpm --verbose --modpath=. install https://github.com/bakpakin/x43bot.git
 @if errorlevel 1 goto :TESTINSTALLFAIL
 popd
 exit /b 0

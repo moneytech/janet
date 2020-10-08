@@ -1,6 +1,58 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## Unreleased - ???
+- Add integer parsing forms to pegs. This makes parsing many binary protocols easier.
+
+## 1.12.2 - 2020-09-20
+- Add janet\_try and janet\_restore to C API.
+- Fix `os/execute` regression on windows.
+- Add :pipe option to `os/spawn`.
+- Fix docstring typos.
+
+## 1.12.1 - 2020-09-07
+- Make `zero?`, `one?`, `pos?`, and `neg?` polymorphic.
+- Add C++ support to jpm and improve C++ interop in janet.h.
+- Add `%t` formatter to `printf`, `string/format`, and other formatter functions.
+- Expose `janet_cfuns_prefix` in C API.
+- Add `os/proc-wait` and `os/proc-kill` for interacting with processes.
+- Add `janet_getjfile` to C API.
+- Allow redirection of stdin, stdout, and stderr by passing keywords in the env table in `os/spawn` and `os/execute`.
+- Add `os/spawn` to get a core/process back instead of an exit code as in `os/execute`.
+  When called like this, `os/execute` returns immediately.
+- Add `:x` flag to os/execute to raise error when exit code is non-zero.
+- Don't run `main` when flychecking.
+- Add `:n` flag to `file/open` to raise an error if file cannot be opened.
+- Fix import macro to not try and coerce everything to a string.
+- Allow passing a second argument to `disasm`.
+- Add `cancel`. Resumes a fiber but makes it immediately error at the yield point.
+- Allow multi-line paste into built in repl.
+- Add `(curenv)`.
+- Change `net/read`, `net/chunk`, and `net/write` to raise errors in the case of failures.
+- Add `janet_continue_signal` to C API. This indirectly enables C functions that yield to the event loop
+  to raise errors or other signals.
+- Update meson build script to fix bug on Debian's version of meson
+- Add `xprint`, `xprin`, `xprintf`, and `xprinf`.
+- `net/write` now raises an error message if write fails.
+- Fix issue with SIGPIPE on macOS and BSDs.
+
+## 1.11.3 - 2020-08-03
+- Add `JANET_HASHSEED` environment variable when `JANET_PRF` is enabled.
+- Expose `janet_cryptorand` in C API.
+- Properly initialize PRF in default janet program
+- Add `index-of` to core library.
+- Add `-fPIC` back to core CFLAGS (non-optional when compiling default client with Makefile)
+- Fix defaults on Windows for ARM
+- Fix defaults on NetBSD.
+
+## 1.11.1 - 2020-07-25
+- Fix jpm and git with multiple git installs on Windows
+- Fix importing a .so file in the current directory
+- Allow passing byte sequence types directly to typed-array constructors.
+- Fix bug sending files between threads.
+- Disable PRF by default.
+- Update the soname.
+
 ## 1.11.0 - 2020-07-18
 - Add `forever` macro.
 - Add `any?` predicate to core.

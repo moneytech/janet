@@ -24,6 +24,7 @@
 #include "features.h"
 #include <janet.h>
 #include "util.h"
+#include "gc.h"
 #endif
 
 #ifndef JANET_REDUCED_OS
@@ -36,8 +37,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-
-#define RETRY_EINTR(RC, CALL) do { (RC) = CALL; } while((RC) < 0 && errno == EINTR)
+#include <signal.h>
 
 #ifdef JANET_APPLE
 #include <AvailabilityMacros.h>
@@ -66,12 +66,6 @@ extern char **environ;
 #ifdef __MACH__
 #include <mach/clock.h>
 #include <mach/mach.h>
-#endif
-
-/* Setting C99 standard makes this not available, but it should
- * work/link properly if we detect a BSD */
-#if defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
-void arc4random_buf(void *buf, size_t nbytes);
 #endif
 
 /* Not POSIX, but all Unixes but Solaris have this function. */
@@ -227,7 +221,8 @@ static char **os_execute_env(int32_t argc, const Janet *argv) {
     return envp;
 }
 
-/* Free memory from os_execute */
+/* Free memory from os_execute. Not actually needed, but doesn't pressure the GC
+   in the happy path. */
 static void os_execute_cleanup(char **envp, const char **child_argv) {
 #ifdef JANET_WINDOWS
     (void) child_argv;
@@ -320,16 +315,216 @@ static JanetBuffer *os_exec_escape(JanetView args) {
 }
 #endif
 
-static Janet os_execute(int32_t argc, Janet *argv) {
+/* Process type for when running a subprocess and not immediately waiting */
+static const JanetAbstractType ProcAT;
+#define JANET_PROC_CLOSED 1
+#define JANET_PROC_WAITED 2
+typedef struct {
+    int flags;
+#ifdef JANET_WINDOWS
+    HANDLE pHandle;
+    HANDLE tHandle;
+#else
+    int pid;
+#endif
+    int return_code;
+    JanetFile *in;
+    JanetFile *out;
+    JanetFile *err;
+} JanetProc;
+
+static int janet_proc_gc(void *p, size_t s) {
+    (void) s;
+    JanetProc *proc = (JanetProc *) p;
+#ifdef JANET_WINDOWS
+    if (!(proc->flags & JANET_PROC_CLOSED)) {
+        CloseHandle(proc->pHandle);
+        CloseHandle(proc->tHandle);
+    }
+#else
+    if (!(proc->flags & JANET_PROC_WAITED)) {
+        /* Kill and wait to prevent zombies */
+        kill(proc->pid, SIGKILL);
+        int status;
+        waitpid(proc->pid, &status, 0);
+    }
+#endif
+    return 0;
+}
+
+static int janet_proc_mark(void *p, size_t s) {
+    (void) s;
+    JanetProc *proc = (JanetProc *)p;
+    if (NULL != proc->in) janet_mark(janet_wrap_abstract(proc->in));
+    if (NULL != proc->out) janet_mark(janet_wrap_abstract(proc->out));
+    if (NULL != proc->err) janet_mark(janet_wrap_abstract(proc->err));
+    return 0;
+}
+
+static Janet os_proc_wait_impl(JanetProc *proc) {
+    if (proc->flags & JANET_PROC_WAITED) {
+        janet_panicf("cannot wait on process that has already finished");
+    }
+    proc->flags |= JANET_PROC_WAITED;
+    int status = 0;
+#ifdef JANET_WINDOWS
+    WaitForSingleObject(proc->pHandle, INFINITE);
+    GetExitCodeProcess(proc->pHandle, &status);
+    if (!(proc->flags & JANET_PROC_CLOSED)) {
+        proc->flags |= JANET_PROC_CLOSED;
+        CloseHandle(proc->pHandle);
+        CloseHandle(proc->tHandle);
+    }
+#else
+    waitpid(proc->pid, &status, 0);
+#endif
+    proc->return_code = (int32_t) status;
+    return janet_wrap_integer(proc->return_code);
+}
+
+static Janet os_proc_wait(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetProc *proc = janet_getabstract(argv, 0, &ProcAT);
+    return os_proc_wait_impl(proc);
+}
+
+static Janet os_proc_kill(int32_t argc, Janet *argv) {
+    janet_arity(argc, 1, 2);
+    JanetProc *proc = janet_getabstract(argv, 0, &ProcAT);
+    if (proc->flags & JANET_PROC_WAITED) {
+        janet_panicf("cannot kill process that has already finished");
+    }
+#ifdef JANET_WINDOWS
+    if (proc->flags & JANET_PROC_CLOSED) {
+        janet_panicf("cannot close process handle that is already closed");
+    }
+    proc->flags |= JANET_PROC_CLOSED;
+    CloseHandle(proc->pHandle);
+    CloseHandle(proc->tHandle);
+#else
+    int status = kill(proc->pid, SIGKILL);
+    if (status) {
+        janet_panic(strerror(errno));
+    }
+#endif
+    /* After killing process we wait on it. */
+    if (argc > 1 && janet_truthy(argv[1])) {
+        return os_proc_wait_impl(proc);
+    } else {
+        return argv[0];
+    }
+}
+
+static void swap_handles(JanetHandle *handles) {
+    JanetHandle temp = handles[0];
+    handles[0] = handles[1];
+    handles[1] = temp;
+}
+
+static void close_handle(JanetHandle handle) {
+#ifdef JANET_WINDOWS
+    CloseHandle(handle);
+#else
+    close(handle);
+#endif
+}
+
+/* Create piped file for os/execute and os/spawn. Need to be careful that we mark
+   the error flag if we can't create pipe and don't leak handles. *handle will be cleaned
+   up by the calling function. If everything goes well, *handle is owned by the calling function,
+   (if it is set) and the returned JanetFile owns the other end of the pipe, which will be closed
+   on GC or fclose. */
+static JanetFile *make_pipes(JanetHandle *handle, int reverse, int *errflag) {
+    JanetHandle handles[2];
+#ifdef JANET_WINDOWS
+    SECURITY_ATTRIBUTES saAttr;
+    memset(&saAttr, 0, sizeof(saAttr));
+    saAttr.nLength = sizeof(saAttr);
+    saAttr.bInheritHandle = TRUE;
+    if (!CreatePipe(handles, handles + 1, &saAttr, 0)) goto error_pipe;
+    if (reverse) swap_handles(handles);
+    /* Don't inherit the side of the pipe owned by this process */
+    if (!SetHandleInformation(handles[0], HANDLE_FLAG_INHERIT, 0)) goto error_set_handle_info;
+    *handle = handles[1];
+    int fd = _open_osfhandle((intptr_t) handles[0], reverse ? _O_WRONLY : _O_RDONLY);
+    if (fd == -1) goto error_open_osfhandle;
+    FILE *f = _fdopen(fd, reverse ? "w" : "r");
+    if (NULL == f) goto error_fdopen;
+    return janet_makejfile(f, reverse ? JANET_FILE_WRITE : JANET_FILE_READ);
+error_fdopen:
+    _close(fd); /* we need to close the fake file descriptor instead of the handle, as ownership has been transfered. */
+    *errflag = 1;
+    return NULL;
+error_set_handle_info:
+error_open_osfhandle:
+    close_handle(handles[0]);
+    /* fallthrough */
+error_pipe:
+    *errflag = 1;
+    return NULL;
+#else
+    if (pipe(handles)) goto error_pipe;
+    if (reverse) swap_handles(handles);
+    *handle = handles[1];
+    FILE *f = fdopen(handles[0], reverse ? "w" : "r");
+    if (NULL == f) goto error_fdopen;
+    return janet_makejfile(f, reverse ? JANET_FILE_WRITE : JANET_FILE_READ);
+error_fdopen:
+    close_handle(handles[0]);
+    /* fallthrough */
+error_pipe:
+    *errflag = 1;
+    return NULL;
+#endif
+}
+
+static const JanetMethod proc_methods[] = {
+    {"wait", os_proc_wait},
+    {"kill", os_proc_kill},
+    {NULL, NULL}
+};
+
+static int janet_proc_get(void *p, Janet key, Janet *out) {
+    JanetProc *proc = (JanetProc *)p;
+    if (janet_keyeq(key, "in")) {
+        *out = (NULL == proc->in) ? janet_wrap_nil() : janet_wrap_abstract(proc->in);
+        return 1;
+    }
+    if (janet_keyeq(key, "out")) {
+        *out = (NULL == proc->out) ? janet_wrap_nil() : janet_wrap_abstract(proc->out);
+        return 1;
+    }
+    if (janet_keyeq(key, "err")) {
+        *out = (NULL == proc->out) ? janet_wrap_nil() : janet_wrap_abstract(proc->err);
+        return 1;
+    }
+    if ((-1 != proc->return_code) && janet_keyeq(key, "return-code")) {
+        *out = janet_wrap_integer(proc->return_code);
+        return 1;
+    }
+    if (!janet_checktype(key, JANET_KEYWORD)) return 0;
+    return janet_getmethod(janet_unwrap_keyword(key), proc_methods, out);
+}
+
+static const JanetAbstractType ProcAT = {
+    "core/process",
+    janet_proc_gc,
+    janet_proc_mark,
+    janet_proc_get,
+    JANET_ATEND_GET
+};
+
+static Janet os_execute_impl(int32_t argc, Janet *argv, int is_async) {
     janet_arity(argc, 1, 3);
 
     /* Get flags */
     uint64_t flags = 0;
     if (argc > 1) {
-        flags = janet_getflags(argv, 1, "ep");
+        flags = janet_getflags(argv, 1, "epx");
     }
 
     /* Get environment */
+    int use_environ = !janet_flag_at(flags, 0);
     char **envp = os_execute_env(argc, argv);
 
     /* Get arguments */
@@ -338,43 +533,132 @@ static Janet os_execute(int32_t argc, Janet *argv) {
         janet_panic("expected at least 1 command line argument");
     }
 
+    /* Optional stdio redirections */
+    JanetFile *new_in = NULL, *new_out = NULL, *new_err = NULL;
+    JanetHandle pipe_in = JANET_HANDLE_NONE, pipe_out = JANET_HANDLE_NONE, pipe_err = JANET_HANDLE_NONE;
+    int pipe_errflag = 0; /* Track errors setting up pipes */
+
+    /* Get optional redirections */
+    if (argc > 2) {
+        JanetDictView tab = janet_getdictionary(argv, 2);
+        Janet maybe_stdin = janet_dictionary_get(tab.kvs, tab.cap, janet_ckeywordv("in"));
+        Janet maybe_stdout = janet_dictionary_get(tab.kvs, tab.cap, janet_ckeywordv("out"));
+        Janet maybe_stderr = janet_dictionary_get(tab.kvs, tab.cap, janet_ckeywordv("err"));
+        if (janet_keyeq(maybe_stdin, "pipe")) {
+            new_in = make_pipes(&pipe_in, 1, &pipe_errflag);
+        } else if (!janet_checktype(maybe_stdin, JANET_NIL)) {
+            new_in = janet_getjfile(&maybe_stdin, 0);
+        }
+        if (janet_keyeq(maybe_stdout, "pipe")) {
+            new_out = make_pipes(&pipe_out, 0, &pipe_errflag);
+        } else if (!janet_checktype(maybe_stdout, JANET_NIL)) {
+            new_out = janet_getjfile(&maybe_stdout, 0);
+        }
+        if (janet_keyeq(maybe_stderr, "err")) {
+            new_err = make_pipes(&pipe_err, 0, &pipe_errflag);
+        } else if (!janet_checktype(maybe_stderr, JANET_NIL)) {
+            new_err = janet_getjfile(&maybe_stderr, 0);
+        }
+    }
+
+    /* Clean up if any of the pipes have any issues */
+    if (pipe_errflag) {
+        if (pipe_in != JANET_HANDLE_NONE) close_handle(pipe_in);
+        if (pipe_out != JANET_HANDLE_NONE) close_handle(pipe_out);
+        if (pipe_err != JANET_HANDLE_NONE) close_handle(pipe_err);
+        janet_panic("failed to create pipes");
+    }
+
     /* Result */
     int status = 0;
 
 #ifdef JANET_WINDOWS
+
+    HANDLE pHandle, tHandle;
+    SECURITY_ATTRIBUTES saAttr;
+    PROCESS_INFORMATION processInfo;
+    STARTUPINFO startupInfo;
+    memset(&saAttr, 0, sizeof(saAttr));
+    memset(&processInfo, 0, sizeof(processInfo));
+    memset(&startupInfo, 0, sizeof(startupInfo));
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    saAttr.nLength = sizeof(saAttr);
+    saAttr.bInheritHandle = TRUE;
 
     JanetBuffer *buf = os_exec_escape(exargs);
     if (buf->count > 8191) {
         janet_panic("command line string too long (max 8191 characters)");
     }
     const char *path = (const char *) janet_unwrap_string(exargs.items[0]);
-    char *cargv[2] = {(char *) buf->data, NULL};
+
+    /* Do IO redirection */
+
+    if (pipe_in != JANET_HANDLE_NONE) {
+        startupInfo.hStdInput = pipe_in;
+    } else if (new_in != NULL) {
+        startupInfo.hStdInput = (HANDLE) _get_osfhandle(_fileno(new_in->file));
+    } else {
+        startupInfo.hStdInput = (HANDLE) _get_osfhandle(0);
+    }
+
+
+    if (pipe_out != JANET_HANDLE_NONE) {
+        startupInfo.hStdOutput = pipe_out;
+    } else if (new_out != NULL) {
+        startupInfo.hStdOutput = (HANDLE) _get_osfhandle(_fileno(new_out->file));
+    } else {
+        startupInfo.hStdOutput = (HANDLE) _get_osfhandle(1);
+    }
+
+    if (pipe_err != JANET_HANDLE_NONE) {
+        startupInfo.hStdError = pipe_err;
+    } else if (new_err != NULL) {
+        startupInfo.hStdError = (HANDLE) _get_osfhandle(_fileno(new_err->file));
+    } else {
+        startupInfo.hStdError = (HANDLE) _get_osfhandle(2);
+    }
 
     /* Use _spawn family of functions. */
     /* Windows docs say do this before any spawns. */
     _flushall();
 
-    /* Use an empty env instead when envp is NULL to be consistent with other implementation. */
-    char *empty_env[1] = {NULL};
-    char **envp1 = (NULL == envp) ? empty_env : envp;
-
-    if (janet_flag_at(flags, 1) && janet_flag_at(flags, 0)) {
-        status = (int) _spawnvpe(_P_WAIT, path, cargv, envp1);
-    } else if (janet_flag_at(flags, 1)) {
-        status = (int) _spawnvp(_P_WAIT, path, cargv);
-    } else if (janet_flag_at(flags, 0)) {
-        status = (int) _spawnve(_P_WAIT, path, cargv, envp1);
-    } else {
-        status = (int) _spawnv(_P_WAIT, path, cargv);
+    int cp_failed = 0;
+    if (!CreateProcess(janet_flag_at(flags, 1) ? NULL : path,
+                       (char *) buf->data, /* Single CLI argument */
+                       &saAttr, /* no proc inheritance */
+                       &saAttr, /* no thread inheritance */
+                       TRUE, /* handle inheritance */
+                       0, /* flags */
+                       use_environ ? NULL : envp, /* pass in environment */
+                       NULL, /* use parents starting directory */
+                       &startupInfo,
+                       &processInfo)) {
+        cp_failed = 1;
     }
+
+    if (pipe_in != JANET_HANDLE_NONE) CloseHandle(pipe_in);
+    if (pipe_out != JANET_HANDLE_NONE) CloseHandle(pipe_out);
+    if (pipe_err != JANET_HANDLE_NONE) CloseHandle(pipe_err);
+
     os_execute_cleanup(envp, NULL);
 
-    /* Check error */
-    if (-1 == status) {
-        janet_panicf("%p: %s", argv[0], strerror(errno));
+    if (cp_failed)  {
+        janet_panic("failed to create process");
     }
 
-    return janet_wrap_integer(status);
+    pHandle = processInfo.hProcess;
+    tHandle = processInfo.hThread;
+
+    /* Wait and cleanup immedaitely */
+    if (!is_async) {
+        DWORD code;
+        WaitForSingleObject(pHandle, INFINITE);
+        GetExitCodeProcess(pHandle, &code);
+        status = (int) code;
+        CloseHandle(pHandle);
+        CloseHandle(tHandle);
+    }
 #else
 
     const char **child_argv = janet_smalloc(sizeof(char *) * ((size_t) exargs.len + 1));
@@ -387,22 +671,45 @@ static Janet os_execute(int32_t argc, Janet *argv) {
 
     /* Use posix_spawn to spawn new process */
 
-    int use_environ = !janet_flag_at(flags, 0);
-
     if (use_environ) {
         janet_lock_environ();
+    }
+
+    /* Posix spawn setup */
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (pipe_in != JANET_HANDLE_NONE) {
+        posix_spawn_file_actions_adddup2(&actions, pipe_in, 0);
+    } else if (new_in != NULL) {
+        posix_spawn_file_actions_adddup2(&actions, fileno(new_in->file), 0);
+    }
+    if (pipe_out != JANET_HANDLE_NONE) {
+        posix_spawn_file_actions_adddup2(&actions, pipe_out, 1);
+    } else if (new_out != NULL) {
+        posix_spawn_file_actions_adddup2(&actions, fileno(new_out->file), 1);
+    }
+    if (pipe_err != JANET_HANDLE_NONE) {
+        posix_spawn_file_actions_adddup2(&actions, pipe_err, 2);
+    } else if (new_err != NULL) {
+        posix_spawn_file_actions_adddup2(&actions, fileno(new_err->file), 2);
     }
 
     pid_t pid;
     if (janet_flag_at(flags, 1)) {
         status = posix_spawnp(&pid,
-                              child_argv[0], NULL, NULL, cargv,
+                              child_argv[0], &actions, NULL, cargv,
                               use_environ ? environ : envp);
     } else {
         status = posix_spawn(&pid,
-                             child_argv[0], NULL, NULL, cargv,
+                             child_argv[0], &actions, NULL, cargv,
                              use_environ ? environ : envp);
     }
+
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (pipe_in != JANET_HANDLE_NONE) close(pipe_in);
+    if (pipe_out != JANET_HANDLE_NONE) close(pipe_out);
+    if (pipe_err != JANET_HANDLE_NONE) close(pipe_err);
 
     if (use_environ) {
         janet_unlock_environ();
@@ -412,22 +719,51 @@ static Janet os_execute(int32_t argc, Janet *argv) {
     if (status) {
         os_execute_cleanup(envp, child_argv);
         janet_panicf("%p: %s", argv[0], strerror(errno));
+    } else if (is_async) {
+        /* Get process handle */
+        os_execute_cleanup(envp, child_argv);
     } else {
+        /* Wait to complete */
         waitpid(pid, &status, 0);
+        os_execute_cleanup(envp, child_argv);
+        /* Use POSIX shell semantics for interpreting signals */
+        if (WIFEXITED(status)) {
+            status = WEXITSTATUS(status);
+        } else if (WIFSTOPPED(status)) {
+            status = WSTOPSIG(status) + 128;
+        } else {
+            status = WTERMSIG(status) + 128;
+        }
     }
 
-    os_execute_cleanup(envp, child_argv);
-    /* Use POSIX shell semantics for interpreting signals */
-    int ret;
-    if (WIFEXITED(status)) {
-        ret = WEXITSTATUS(status);
-    } else if (WIFSTOPPED(status)) {
-        ret = WSTOPSIG(status) + 128;
-    } else {
-        ret = WTERMSIG(status) + 128;
-    }
-    return janet_wrap_integer(ret);
 #endif
+    if (is_async) {
+        JanetProc *proc = janet_abstract(&ProcAT, sizeof(JanetProc));
+        proc->return_code = -1;
+#ifdef JANET_WINDOWS
+        proc->pHandle = pHandle;
+        proc->tHandle = tHandle;
+#else
+        proc->pid = pid;
+#endif
+        proc->in = new_in;
+        proc->out = new_out;
+        proc->err = new_err;
+        proc->flags = 0;
+        return janet_wrap_abstract(proc);
+    } else if (janet_flag_at(flags, 2) && status) {
+        janet_panicf("command failed with non-zero exit code %d", status);
+    } else {
+        return janet_wrap_integer(status);
+    }
+}
+
+static Janet os_execute(int32_t argc, Janet *argv) {
+    return os_execute_impl(argc, argv, 0);
+}
+
+static Janet os_spawn(int32_t argc, Janet *argv) {
+    return os_execute_impl(argc, argv, 1);
 }
 
 static Janet os_shell(int32_t argc, Janet *argv) {
@@ -557,7 +893,6 @@ static Janet os_cwd(int32_t argc, Janet *argv) {
 
 static Janet os_cryptorand(int32_t argc, Janet *argv) {
     JanetBuffer *buffer;
-    const char *genericerr = "unable to get sufficient random data";
     janet_arity(argc, 1, 2);
     int32_t offset;
     int32_t n = janet_getinteger(argv, 0);
@@ -572,44 +907,9 @@ static Janet os_cryptorand(int32_t argc, Janet *argv) {
     /* We could optimize here by adding setcount_uninit */
     janet_buffer_setcount(buffer, offset + n);
 
-#ifdef JANET_WINDOWS
-    for (int32_t i = offset; i < buffer->count; i += sizeof(unsigned int)) {
-        unsigned int v;
-        if (rand_s(&v))
-            janet_panic(genericerr);
-        for (int32_t j = 0; (j < sizeof(unsigned int)) && (i + j < buffer->count); j++) {
-            buffer->data[i + j] = v & 0xff;
-            v = v >> 8;
-        }
-    }
-#elif defined(JANET_LINUX) || ( defined(JANET_APPLE) && !defined(MAC_OS_X_VERSION_10_7) )
-    /* We should be able to call getrandom on linux, but it doesn't seem
-       to be uniformly supported on linux distros.
-       On Mac, arc4random_buf wasn't available on until 10.7.
-       In these cases, use this fallback path for now... */
-    int rc;
-    int randfd;
-    RETRY_EINTR(randfd, open("/dev/urandom", O_RDONLY | O_CLOEXEC));
-    if (randfd < 0)
-        janet_panic(genericerr);
-    while (n > 0) {
-        ssize_t nread;
-        RETRY_EINTR(nread, read(randfd, buffer->data + offset, n));
-        if (nread <= 0) {
-            RETRY_EINTR(rc, close(randfd));
-            janet_panic(genericerr);
-        }
-        offset += nread;
-        n -= nread;
-    }
-    RETRY_EINTR(rc, close(randfd));
-#elif defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
-    (void) genericerr;
-    arc4random_buf(buffer->data + offset, n);
-#else
-    (void) genericerr;
-    janet_panic("cryptorand currently unsupported on this platform");
-#endif
+    if (janet_cryptorand(buffer->data + offset, n) != 0)
+        janet_panic("unable to get sufficient random data");
+
     return janet_wrap_buffer(buffer);
 }
 
@@ -1378,14 +1678,40 @@ static const JanetReg os_cfuns[] = {
              "\t:e - enables passing an environment to the program. Without :e, the "
              "current environment is inherited.\n"
              "\t:p - allows searching the current PATH for the binary to execute. "
-             "Without this flag, binaries must use absolute paths.\n\n"
-             "env is a table or struct mapping environment variables to values. "
+             "Without this flag, binaries must use absolute paths.\n"
+             "\t:x - raise error if exit code is non-zero.\n"
+             "env is a table or struct mapping environment variables to values. It can also "
+             "contain the keys :in, :out, and :err, which allow redirecting stdio in the subprocess. "
+             "These arguments should be core/file values. "
+             "One can also pass in the :pipe keyword "
+             "for these arguments to create files that will read (for :err and :out) or write (for :in) "
+             "to the file descriptor of the subprocess. This is only useful in os/spawn, which takes "
+             "the same parameters as os/execute, but will return an object that contains references to these "
+             "files via (return-value :in), (return-value :out), and (return-value :err). "
              "Returns the exit status of the program.")
+    },
+    {
+        "os/spawn", os_spawn,
+        JDOC("(os/spawn args &opts flags env)\n\n"
+             "Execute a program on the system and return a handle to the process. Otherwise, the "
+             "same arguments as os/execute. Does not wait for the process.")
     },
     {
         "os/shell", os_shell,
         JDOC("(os/shell str)\n\n"
              "Pass a command string str directly to the system shell.")
+    },
+    {
+        "os/proc-wait", os_proc_wait,
+        JDOC("(os/proc-wait proc)\n\n"
+             "Block until the subprocess completes. Returns the subprocess return code.")
+    },
+    {
+        "os/proc-kill", os_proc_kill,
+        JDOC("(os/proc-kill proc &opt wait)\n\n"
+             "Kill a subprocess by sending SIGKILL to it on posix systems, or by closing the process "
+             "handle on windows. If wait is truthy, will wait for the process to finsih and "
+             "returns the exit code. Otherwise, returns proc.")
     },
 #endif
     {

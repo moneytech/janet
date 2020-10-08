@@ -7,6 +7,8 @@
 ###
 ###
 
+(def root-env "The root environment used to create environments with (make-env)" _env)
+
 (def defn :macro
   "(defn name & more)\n\nDefine a function. Equivalent to (def name (fn name [args] ...))."
   (fn defn [name & more]
@@ -81,10 +83,6 @@
 (defn nan? "Check if x is NaN" [x] (not= x x))
 (defn even? "Check if x is even." [x] (= 0 (mod x 2)))
 (defn odd? "Check if x is odd." [x] (= 1 (mod x 2)))
-(defn zero? "Check if x is zero." [x] (= x 0))
-(defn pos? "Check if x is greater than 0." [x] (> x 0))
-(defn neg? "Check if x is less than 0." [x] (< x 0))
-(defn one? "Check if x is equal to 1." [x] (= x 1))
 (defn number? "Check if x is a number." [x] (= (type x) :number))
 (defn fiber? "Check if x is a fiber." [x] (= (type x) :fiber))
 (defn string? "Check if x is a string." [x] (= (type x) :string))
@@ -567,15 +565,6 @@
   [head & body]
   (loop1 body head 0))
 
-(put _env 'loop1 nil)
-(put _env 'check-indexed nil)
-(put _env 'for-template nil)
-(put _env 'for-var-template nil)
-(put _env 'iterate-template nil)
-(put _env 'each-template nil)
-(put _env 'range-template nil)
-(put _env 'loop-fiber-template nil)
-
 (defmacro seq
   "Similar to loop, but accumulates the loop body into an array and returns that.
   See loop for details."
@@ -593,6 +582,16 @@
   "A wrapper for making fibers. Same as (fiber/new (fn [] ;body) :yi)."
   [& body]
   (tuple fiber/new (tuple 'fn '[] ;body) :yi))
+
+(defmacro- undef
+  "Remove binding from root-env"
+  [& syms]
+  ~(do ,;(seq [s :in syms] ~(put root-env ',s nil))))
+
+(undef _env)
+
+(undef loop1 check-indexed for-template for-var-template iterate-template
+       each-template range-template loop-fiber-template)
 
 (defn sum
   "Returns the sum of xs. If xs is empty, returns 0."
@@ -619,7 +618,7 @@
   the fal form. Bindings have the same syntax as the let macro."
   [bindings tru &opt fal]
   (def len (length bindings))
-  (if (zero? len) (error "expected at least 1 binding"))
+  (if (= 0 len) (error "expected at least 1 binding"))
   (if (odd? len) (error "expected an even number of bindings"))
   (defn aux [i]
     (if (>= i len)
@@ -749,7 +748,12 @@
   [& xs]
   (compare-reduce >= xs))
 
-(put _env 'compare-reduce nil)
+(defn zero? "Check if x is zero." [x] (= (compare x 0) 0))
+(defn pos? "Check if x is greater than 0." [x] (= (compare x 0) 1))
+(defn neg? "Check if x is less than 0." [x] (= (compare x 0) -1))
+(defn one? "Check if x is equal to 1." [x] (= (compare x 1) 0))
+
+(undef compare-reduce)
 
 ###
 ###
@@ -785,8 +789,8 @@
   [a &opt by]
   (sort-help a 0 (- (length a) 1) (or by <)))
 
-(put _env 'sort-part nil)
-(put _env 'sort-help nil)
+(undef sort-part)
+(undef sort-help)
 
 (defn sort-by
   "Returns a new sorted array that compares elements by invoking
@@ -957,6 +961,18 @@
   (def i (find-index pred ind))
   (if (= i nil) nil (in ind i)))
 
+(defn index-of
+  "Find the first key associated with a value x in a data structure, acting like a reverse lookup.
+  Will not look at table prototypes.
+  Returns dflt if not found."
+  [x ind &opt dflt]
+  (var k (next ind nil))
+  (var ret dflt)
+  (while (not= nil k)
+    (when (= (in ind k) x) (set ret k) (break))
+    (set k (next ind k)))
+  ret)
+
 (defn take
   "Take first n elements in an indexed type. Returns new indexed instance."
   [n ind]
@@ -1125,11 +1141,14 @@
     :table (walk-dict f form)
     :struct (table/to-struct (walk-dict f form))
     :array (walk-ind f form)
-    :tuple (tuple/slice (walk-ind f form))
+    :tuple (let [x (walk-ind f form)]
+             (if (= :parens (tuple/type form))
+               (tuple/slice x)
+               (tuple/brackets ;x)))
     form))
 
-(put _env 'walk-ind nil)
-(put _env 'walk-dict nil)
+(undef walk-ind)
+(undef walk-dict)
 
 (defn postwalk
   "Do a post-order traversal of a data structure and call (f x)
@@ -1212,7 +1231,7 @@
   res)
 
 (defn any?
-  "Returns the first truthy valye in ind, otherwise nil.
+  "Returns the first truthy value in ind, otherwise nil.
   falsey value."
   [ind]
   (var res nil)
@@ -1338,7 +1357,7 @@
   [tab & colls]
   (loop [c :in colls
          key :keys c]
-    (set (tab key) (in c key)))
+    (put tab key (in c key)))
   tab)
 
 (defn merge
@@ -1349,7 +1368,7 @@
   (def container @{})
   (loop [c :in colls
          key :keys c]
-    (set (container key) (in c key)))
+    (put container key (in c key)))
   container)
 
 (defn keys
@@ -1603,9 +1622,9 @@
                           ,(aux (+ 2 i))
                           ,$res)))) 0)))
 
-(put _env 'sentinel nil)
-(put _env 'match-1 nil)
-(put _env 'with-idemp nil)
+(undef sentinel)
+(undef match-1)
+(undef with-idemp)
 
 ###
 ###
@@ -1686,7 +1705,7 @@
   (print (doc-format (string "Bindings:\n\n" (string/join bindings " "))))
   (print)
   (print (doc-format (string "Dynamics:\n\n" (string/join dynamics " "))))
-  (print))
+  (print "\n    Use (doc sym) for more information on a binding.\n"))
 
 (defn doc*
   "Get the documentation for a symbol in a given environment. Function form of doc."
@@ -1730,8 +1749,8 @@
   [&opt sym]
   ~(,doc* ',sym))
 
-(put _env 'env-walk nil)
-(put _env 'print-index nil)
+(undef env-walk)
+(undef print-index)
 
 ###
 ###
@@ -1792,14 +1811,16 @@
   (defn expandqq [t]
     (defn qq [x]
       (case (type x)
-        :tuple (do
-                 (def x0 (in x 0))
-                 (if (or (= 'unquote x0) (= 'unquote-splicing x0))
-                   (tuple x0 (recur (in x 1)))
-                   (tuple/slice (map qq x))))
+        :tuple (if (= :brackets (tuple/type x))
+                 ~[,;(map qq x)]
+                 (do
+                   (def x0 (get x 0))
+                   (if (= 'unquote x0)
+                     (tuple x0 (recur (get x 1)))
+                     (tuple/slice (map qq x)))))
         :array (map qq x)
-        :table (table (map qq (kvs x)))
-        :struct (struct (map qq (kvs x)))
+        :table (table ;(map qq (kvs x)))
+        :struct (struct ;(map qq (kvs x)))
         x))
     (tuple (in t 0) (qq (in t 1))))
 
@@ -1863,7 +1884,7 @@
     (case tx
       :tuple (or (not= (length x) (length y)) (some identity (map deep-not= x y)))
       :array (or (not= (length x) (length y)) (some identity (map deep-not= x y)))
-      :struct (deep-not= (pairs x) (pairs y))
+      :struct (deep-not= (kvs x) (kvs y))
       :table (deep-not= (table/to-struct x) (table/to-struct y))
       :buffer (not= (string x) (string y))
       (not= x y))))
@@ -2018,7 +2039,7 @@
   will inherit bindings from the parent environment, but new
   bindings will not pollute the parent environment."
   [&opt parent]
-  (def parent (if parent parent _env))
+  (def parent (if parent parent root-env))
   (def newenv (table/setproto @{} parent))
   newenv)
 
@@ -2054,6 +2075,14 @@
       where
       (if ec "\e[0m" "")))
   (eflush))
+
+(defn curenv
+  "Get the current environment table. Same as (fiber/getenv (fiber/current)). If n
+  is provided, gets the nth prototype of the environment table."
+  [&opt n]
+  (var e (fiber/getenv (fiber/current)))
+  (if n (repeat n (if (= nil e) (break)) (set e (table/getproto e))))
+  e)
 
 (defn run-context
   "Run a context. This evaluates expressions in an environment,
@@ -2226,10 +2255,11 @@
   by make-image, such that (load-image bytes) is the same as (unmarshal bytes load-image-dict)."
   @{})
 
-(def comptime
+(defmacro comptime
   "(comptime x)\n\n
   Evals x at compile time and returns the result. Similar to a top level unquote."
-  :macro eval)
+  [x]
+  (eval x))
 
 (defn make-image
   "Create an image from an environment returned by require.
@@ -2283,7 +2313,7 @@
 (module/add-paths ".jimage" :image)
 
 # Version of fexists that works even with a reduced OS
-(if-let [has-stat (_env 'os/stat)]
+(if-let [has-stat (root-env 'os/stat)]
   (let [stat (has-stat :value)]
     (defglobal "fexists" (fn fexists [path] (= :file (stat path :mode)))))
   (defglobal "fexists"
@@ -2330,10 +2360,10 @@
           str-parts (interpose "\n    " paths)]
       [nil (string "could not find module " path ":\n    " ;str-parts)])))
 
-(put _env 'fexists nil)
-(put _env 'mod-filter nil)
-(put _env 'check-. nil)
-(put _env 'not-check-. nil)
+(undef fexists)
+(undef mod-filter)
+(undef check-.)
+(undef not-check-.)
 
 (def module/cache
   "Table mapping loaded module identifiers to their environments."
@@ -2441,7 +2471,7 @@
     (def newv (table/setproto @{:private (not ep)} v))
     (put env (symbol prefix k) newv)))
 
-(put _env 'require-1 nil)
+(undef require-1)
 
 (defmacro import
   "Import a module. First requires the module, and then merges its
@@ -2453,11 +2483,12 @@
   to be called. Dynamic bindings will NOT be imported. Use :fresh to bypass the
   module cache."
   [path & args]
-  (def argm (map |(if (keyword? $) $ (string $)) args))
+  (def ps (partition 2 args))
+  (def argm (mapcat (fn [[k v]] [k (if (= k :as) (string v) v)]) ps))
   (tuple import* (string path) ;argm))
 
 (defmacro use
-  "Similar to import, but imported bindings are not prefixed with a namespace
+  "Similar to import, but imported bindings are not prefixed with a module
   identifier. Can also import multiple modules in one shot."
   [& modules]
   ~(do ,;(map |~(,import* ,(string $) :prefix "") modules)))
@@ -2507,7 +2538,7 @@
   (in (.slots frame-idx) (or nth 0)))
 
 # Conditional compilation for disasm
-(def disasm-alias (if-let [x (_env 'disasm)] (x :value)))
+(def disasm-alias (if-let [x (root-env 'disasm)] (x :value)))
 
 (defn .disasm
   "Gets the assembly for the current function."
@@ -2569,13 +2600,9 @@
     (debug/unfbreak fun i))
   (print "Cleared " (length bytecode) " breakpoints in " fun))
 
-(unless (get _env 'disasm)
-  (put _env '.disasm nil)
-  (put _env '.bytecode nil)
-  (put _env '.breakall nil)
-  (put _env '.clearall nil)
-  (put _env '.ppasm nil))
-(put _env 'disasm-alias nil)
+(unless (get root-env 'disasm)
+  (undef .disasm .bytecode .breakall .clearall .ppasm))
+(undef disasm-alias)
 
 (defn .source
   "Show the source code for the function being debugged."
@@ -2629,9 +2656,9 @@
   "An environment that contains dot prefixed functions for debugging."
   @{})
 
-(def- debugger-keys (filter (partial string/has-prefix? ".") (keys _env)))
-(each k debugger-keys (put debugger-env k (_env k)) (put _env k nil))
-(put _env 'debugger-keys nil)
+(def- debugger-keys (filter (partial string/has-prefix? ".") (keys root-env)))
+(each k debugger-keys (put debugger-env k (root-env k)) (put root-env k nil))
+(undef debugger-keys)
 
 ###
 ###
@@ -2727,7 +2754,7 @@
   (each a args (import* (string a) :prefix "" :evaluator evaluator)))
 
 # conditional compilation for reduced os
-(def- getenv-alias (if-let [entry (in _env 'os/getenv)] (entry :value) (fn [&])))
+(def- getenv-alias (if-let [entry (in root-env 'os/getenv)] (entry :value) (fn [&])))
 
 (defn cli-main
   "Entrance for the Janet CLI tool. Call this functions with the command line
@@ -2836,14 +2863,15 @@
         (def subargs (array/slice args i))
         (put env :args subargs)
         (dofile arg :prefix "" :exit *exit-on-error* :evaluator evaluator :env env)
-        (if-let [main (get (in env 'main) :value)]
-          (let [thunk (compile [main ;(tuple/slice args i)] env arg)]
-            (if (function? thunk) (thunk) (error (thunk :error)))))
+        (unless *compile-only*
+          (if-let [main (get (in env 'main) :value)]
+            (let [thunk (compile [main ;(tuple/slice args i)] env arg)]
+              (if (function? thunk) (thunk) (error (thunk :error))))))
         (set i lenargs))))
 
   (when (and (not *compile-only*) (or *should-repl* *no-file*))
     (if-not *quiet*
-      (print "Janet " janet/version "-" janet/build " " (os/which) "/" (os/arch)))
+      (print "Janet " janet/version "-" janet/build " " (os/which) "/" (os/arch) " - '(doc)' for help"))
     (flush)
     (defn getprompt [p]
       (def [line] (parser/where p))
@@ -2861,12 +2889,7 @@
     (setdyn :err-color (if *colorize* true))
     (repl getchunk nil env)))
 
-(put _env 'no-side-effects nil)
-(put _env 'is-safe-def nil)
-(put _env 'safe-forms nil)
-(put _env 'importers nil)
-(put _env 'use-2 nil)
-(put _env 'getenv-alias nil)
+(undef no-side-effects is-safe-def safe-forms importers use-2 getenv-alias)
 
 ###
 ###
@@ -2874,12 +2897,13 @@
 ###
 ###
 
-(def root-env "The root environment used to create environments with (make-env)" _env)
-
 (do
-  (put _env 'boot/opts nil)
-  (put _env '_env nil)
-  (def load-dict (env-lookup _env))
+  (undef boot/opts undef)
+  (def load-dict (env-lookup root-env))
+  (put load-dict 'boot/config nil)
+  (put load-dict 'boot/args nil)
+  (each [k v] (pairs load-dict)
+    (if (number? v) (put load-dict k nil)))
   (merge-into load-image-dict load-dict)
   (merge-into make-image-dict (invert load-dict)))
 
@@ -2900,25 +2924,29 @@
         (put into k (x k))))
     into)
 
-  (def env (fiber/getenv (fiber/current)))
-
   # Modify env based on some options.
-  (loop [[k v] :pairs env
+  (loop [[k v] :pairs root-env
          :when (symbol? k)]
     (def flat (proto-flatten @{} v))
     (when (boot/config :no-docstrings)
       (put flat :doc nil))
     (when (boot/config :no-sourcemaps)
       (put flat :source-map nil))
-    (put env k flat))
+    (put root-env k flat))
 
-  (put env 'boot/config nil)
-  (put env 'boot/args nil)
-  (def image (let [env-pairs (pairs (env-lookup env))
+  (put root-env 'boot/config nil)
+  (put root-env 'boot/args nil)
+
+  (def image (let [env-pairs (pairs (env-lookup root-env))
                    essential-pairs (filter (fn [[k v]] (or (cfunction? v) (abstract? v))) env-pairs)
                    lookup (table ;(mapcat identity essential-pairs))
                    reverse-lookup (invert lookup)]
-               (marshal env reverse-lookup)))
+               # Check no duplicate values
+               (def temp @{})
+               (eachp [k v] lookup
+                 (if (in temp v) (errorf "duplicate value: %v" v))
+                 (put temp v k))
+               (marshal root-env reverse-lookup)))
 
   # Create amalgamation
 

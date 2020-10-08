@@ -63,10 +63,29 @@ typedef void *Clib;
 #define error_clib() dlerror()
 #endif
 
+static char *get_processed_name(const char *name) {
+    if (name[0] == '.') return (char *) name;
+    const char *c;
+    for (c = name; *c; c++) {
+        if (*c == '/') return (char *) name;
+    }
+    size_t l = (size_t)(c - name);
+    char *ret = malloc(l + 3);
+    if (NULL == ret) {
+        JANET_OUT_OF_MEMORY;
+    }
+    ret[0] = '.';
+    ret[1] = '/';
+    memcpy(ret + 2, name, l + 1);
+    return ret;
+}
+
 JanetModule janet_native(const char *name, const uint8_t **error) {
-    Clib lib = load_clib(name);
+    char *processed_name = get_processed_name(name);
+    Clib lib = load_clib(processed_name);
     JanetModule init;
     JanetModconf getter;
+    if (name != processed_name) free(processed_name);
     if (!lib) {
         *error = janet_cstring(error_clib());
         return NULL;
@@ -927,6 +946,10 @@ static const uint32_t resume_asm[] = {
     JOP_RESUME | (1 << 24),
     JOP_RETURN
 };
+static const uint32_t cancel_asm[] = {
+    JOP_CANCEL | (1 << 24),
+    JOP_RETURN
+};
 static const uint32_t in_asm[] = {
     JOP_IN | (1 << 24),
     JOP_LOAD_NIL | (3 << 8),
@@ -1064,6 +1087,11 @@ JanetTable *janet_core_env(JanetTable *replacements) {
                          "Yield a value to a parent fiber. When a fiber yields, its execution is paused until "
                          "another thread resumes it. The fiber will then resume, and the last yield call will "
                          "return the value that was passed to resume."));
+    janet_quick_asm(env, JANET_FUN_CANCEL,
+                    "cancel", 2, 2, 2, 2, cancel_asm, sizeof(cancel_asm),
+                    JDOC("(cancel fiber err)\n\n"
+                         "Resume a fiber but have it immediately raise an error. This lets a programmer unwind a pending fiber. "
+                         "Returns the same result as resume."));
     janet_quick_asm(env, JANET_FUN_RESUME,
                     "resume", 2, 1, 2, 2, resume_asm, sizeof(resume_asm),
                     JDOC("(resume fiber &opt x)\n\n"
@@ -1190,7 +1218,7 @@ JanetTable *janet_core_env(JanetTable *replacements) {
     }
 
     /* Load core cfunctions (and some built in janet assembly functions) */
-    JanetTable *dict = janet_table(300);
+    JanetTable *dict = janet_table(512);
     janet_load_libs(dict);
 
     /* Add replacements */

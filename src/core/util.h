@@ -76,7 +76,6 @@ int32_t janet_tablen(int32_t n);
 void safe_memcpy(void *dest, const void *src, size_t len);
 void janet_buffer_push_types(JanetBuffer *buffer, int types);
 const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key);
-Janet janet_dict_get(const JanetKV *buckets, int32_t cap, Janet key);
 void janet_memempty(JanetKV *mem, int32_t count);
 void *janet_memalloc_empty(int32_t count);
 JanetTable *janet_get_core_table(const char *name);
@@ -107,6 +106,8 @@ void janet_core_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cf
 #ifdef JANET_GETTIME
 int janet_gettime(struct timespec *spec);
 #endif
+
+#define RETRY_EINTR(RC, CALL) do { (RC) = CALL; } while((RC) < 0 && errno == EINTR)
 
 /* Initialize builtin libraries */
 void janet_lib_io(JanetTable *env);

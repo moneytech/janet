@@ -139,6 +139,19 @@ static int janet_stream_close(void *p, size_t s) {
     return 0;
 }
 
+
+static void nosigpipe(JSock s) {
+#ifdef SO_NOSIGPIPE
+    int enable = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &enable, sizeof(int)) < 0) {
+        JSOCKCLOSE(s);
+        janet_panic("setsockopt(SO_NOSIGPIPE) failed");
+    }
+#else
+    (void) s;
+#endif
+}
+
 /*
  * Event loop
  */
@@ -262,8 +275,11 @@ static size_t janet_loop_event(size_t index) {
     int ret = 1;
     int should_resume = 0;
     Janet resumeval = janet_wrap_nil();
+    JanetSignal resumesignal = JANET_SIGNAL_OK;
     if (stream->flags & JANET_STREAM_CLOSED) {
         should_resume = 1;
+        resumeval = janet_cstringv("stream is closed");
+        resumesignal = JANET_SIGNAL_ERROR;
         ret = 0;
     } else {
         switch (jlfd->event_type) {
@@ -275,6 +291,8 @@ static size_t janet_loop_event(size_t index) {
                 if (!(stream->flags & JANET_STREAM_READABLE)) {
                     should_resume = 1;
                     ret = 0;
+                    resumesignal = JANET_SIGNAL_ERROR;
+                    resumeval = janet_cstringv("stream not readable");
                     break;
                 }
                 JReadInt nread;
@@ -296,6 +314,13 @@ static size_t janet_loop_event(size_t index) {
                     should_resume = 1;
                     if (nread > 0) {
                         resumeval = janet_wrap_buffer(buffer);
+                    } else {
+                        if (nread == 0) {
+                            resumeval = janet_cstringv("could not read from stream");
+                        } else {
+                            resumeval = janet_cstringv(strerror(JLASTERR));
+                        }
+                        resumesignal = JANET_SIGNAL_ERROR;
                     }
                     ret = 0;
                 } else {
@@ -308,6 +333,7 @@ static size_t janet_loop_event(size_t index) {
                 JSock connfd = accept(fd, NULL, NULL);
                 if (JSOCKVALID(connfd)) {
                     /* Made a new connection socket */
+                    nosigpipe(connfd);
                     JanetStream *stream = make_stream(connfd, JANET_STREAM_READABLE | JANET_STREAM_WRITABLE);
                     Janet streamv = janet_wrap_abstract(stream);
                     JanetFunction *handler = jlfd->data.read_accept.handler;
@@ -328,6 +354,8 @@ static size_t janet_loop_event(size_t index) {
                 const uint8_t *bytes;
                 if (!(stream->flags & JANET_STREAM_WRITABLE)) {
                     should_resume = 1;
+                    resumesignal = JANET_SIGNAL_ERROR;
+                    resumeval = janet_cstringv("stream not writeable");
                     ret = 0;
                     break;
                 }
@@ -350,6 +378,12 @@ static size_t janet_loop_event(size_t index) {
                     if (nwrote > 0) {
                         start += nwrote;
                     } else {
+                        resumesignal = JANET_SIGNAL_ERROR;
+                        if (nwrote == -1) {
+                            resumeval = janet_cstringv(strerror(JLASTERR));
+                        } else {
+                            resumeval = janet_cstringv("could not write");
+                        }
                         start = len;
                     }
                 }
@@ -376,7 +410,7 @@ static size_t janet_loop_event(size_t index) {
     if (NULL != jlfd->fiber && should_resume) {
         /* Resume the fiber */
         Janet out;
-        JanetSignal sig = janet_continue(jlfd->fiber, resumeval, &out);
+        JanetSignal sig = janet_continue_signal(jlfd->fiber, resumeval, &out, resumesignal);
         if (sig != JANET_SIGNAL_OK && sig != JANET_SIGNAL_EVENT) {
             janet_stacktrace(jlfd->fiber, out);
         }
@@ -511,6 +545,8 @@ static Janet cfun_net_connect(int32_t argc, Janet *argv) {
         janet_panic("could not connect to socket");
     }
 
+    nosigpipe(sock);
+
     /* Wrap socket in abstract type JanetStream */
     JanetStream *stream = make_stream(sock, JANET_STREAM_READABLE | JANET_STREAM_WRITABLE);
     return janet_wrap_abstract(stream);
@@ -536,12 +572,7 @@ static Janet cfun_net_server(int32_t argc, Janet *argv) {
             JSOCKCLOSE(sfd);
             janet_panic("setsockopt(SO_REUSEADDR) failed");
         }
-#ifdef SO_NOSIGPIPE
-        if (setsockopt(sfd, SOL_SOCKET, SO_NOSIGPIPE, &enable, sizeof(int)) < 0) {
-            JSOCKCLOSE(sfd);
-            janet_panic("setsockopt(SO_NOSIGPIPE) failed");
-        }
-#endif
+        nosigpipe(sfd);
 #ifdef SO_REUSEPORT
         if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0) {
             JSOCKCLOSE(sfd);
@@ -566,7 +597,8 @@ static Janet cfun_net_server(int32_t argc, Janet *argv) {
     }
 
     /* Put sfd on our loop */
-    JanetLoopFD lfd = {0};
+    JanetLoopFD lfd;
+    memset(&lfd, 0, sizeof(lfd));
     lfd.stream = make_stream(sfd, 0);
     lfd.event_type = JLE_READ_ACCEPT;
     lfd.data.read_accept.handler = fun;
@@ -636,7 +668,7 @@ static const JanetReg net_cfuns[] = {
         JDOC("(net/read stream nbytes &opt buf)\n\n"
              "Read up to n bytes from a stream, suspending the current fiber until the bytes are available. "
              "If less than n bytes are available (and more than 0), will push those bytes and return early. "
-             "Returns a buffer with up to n more bytes in it.")
+             "Returns a buffer with up to n more bytes in it, or raises an error if the read failed.")
     },
     {
         "net/chunk", cfun_stream_chunk,
@@ -647,7 +679,7 @@ static const JanetReg net_cfuns[] = {
         "net/write", cfun_stream_write,
         JDOC("(net/write stream data)\n\n"
              "Write data to a stream, suspending the current fiber until the write "
-             "completes. Returns stream.")
+             "completes. Returns nil, or raises an error if the write failed.")
     },
     {
         "net/close", cfun_stream_close,

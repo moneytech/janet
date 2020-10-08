@@ -454,7 +454,7 @@ static const char *janet_pretty_colors[] = {
     "\x1B[36m",
     "\x1B[36m",
     "\x1B[36m",
-    "\x1B[36m"
+    "\x1B[36m",
     "\x1B[35m",
     "\x1B[36m",
     "\x1B[36m",
@@ -955,6 +955,9 @@ void janet_buffer_format(
                     janet_description_b(b, argv[arg]);
                     break;
                 }
+                case 't':
+                    janet_buffer_push_cstring(b, typestr(argv[arg]));
+                    break;
                 case 'M':
                 case 'm':
                 case 'N':

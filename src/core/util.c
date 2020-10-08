@@ -28,6 +28,11 @@
 #include "gc.h"
 #ifdef JANET_WINDOWS
 #include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #endif
 #endif
 
@@ -97,7 +102,7 @@ const char *const janet_status_names[16] = {
     "alive"
 };
 
-#ifdef JANET_NO_PRF
+#ifndef JANET_PRF
 
 int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
     const uint8_t *end = str + len;
@@ -444,7 +449,8 @@ void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) 
 
 void janet_register_abstract_type(const JanetAbstractType *at) {
     Janet sym = janet_csymbolv(at->name);
-    if (!(janet_checktype(janet_table_get(janet_vm_abstract_registry, sym), JANET_NIL))) {
+    Janet check = janet_table_get(janet_vm_abstract_registry, sym);
+    if (!janet_checktype(check, JANET_NIL) && at != janet_unwrap_pointer(check)) {
         janet_panicf("cannot register abstract type %s, "
                      "a type with the same name exists", at->name);
     }
@@ -630,3 +636,53 @@ int janet_gettime(struct timespec *spec) {
 }
 #endif
 #endif
+
+/* Setting C99 standard makes this not available, but it should
+ * work/link properly if we detect a BSD */
+#if defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
+void arc4random_buf(void *buf, size_t nbytes);
+#endif
+
+int janet_cryptorand(uint8_t *out, size_t n) {
+#ifdef JANET_WINDOWS
+    for (size_t i = 0; i < n; i += sizeof(unsigned int)) {
+        unsigned int v;
+        if (rand_s(&v))
+            return -1;
+        for (int32_t j = 0; (j < sizeof(unsigned int)) && (i + j < n); j++) {
+            out[i + j] = v & 0xff;
+            v = v >> 8;
+        }
+    }
+    return 0;
+#elif defined(JANET_LINUX) || ( defined(JANET_APPLE) && !defined(MAC_OS_X_VERSION_10_7) )
+    /* We should be able to call getrandom on linux, but it doesn't seem
+       to be uniformly supported on linux distros.
+       On Mac, arc4random_buf wasn't available on until 10.7.
+       In these cases, use this fallback path for now... */
+    int rc;
+    int randfd;
+    RETRY_EINTR(randfd, open("/dev/urandom", O_RDONLY | O_CLOEXEC));
+    if (randfd < 0)
+        return -1;
+    while (n > 0) {
+        ssize_t nread;
+        RETRY_EINTR(nread, read(randfd, out, n));
+        if (nread <= 0) {
+            RETRY_EINTR(rc, close(randfd));
+            return -1;
+        }
+        out += nread;
+        n -= nread;
+    }
+    RETRY_EINTR(rc, close(randfd));
+    return 0;
+#elif defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
+    arc4random_buf(out, n);
+    return 0;
+#else
+    (void) n;
+    (void) out;
+    return -1;
+#endif
+}
